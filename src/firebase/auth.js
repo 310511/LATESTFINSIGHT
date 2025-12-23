@@ -48,8 +48,26 @@ export const signUpWithEmail = async (email, password, displayName) => {
 // Sign in with Google using popup (more reliable than redirect)
 export const signInWithGoogle = async () => {
   try {
-    const result = await signInWithPopup(auth, googleProvider);
-    return { success: true, user: result.user };
+    // Suppress console warnings related to Cross-Origin-Opener-Policy
+    // This is a known Firebase limitation with popup authentication
+    const originalWarn = console.warn;
+    const warningsToSuppress = ['Cross-Origin-Opener-Policy'];
+    
+    console.warn = (...args) => {
+      const message = args.join(' ');
+      if (!warningsToSuppress.some(warning => message.includes(warning))) {
+        originalWarn.apply(console, args);
+      }
+    };
+
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      console.warn = originalWarn; // Restore original console.warn
+      return { success: true, user: result.user };
+    } catch (popupError) {
+      console.warn = originalWarn; // Restore original console.warn
+      throw popupError;
+    }
   } catch (error) {
     // Handle specific error cases
     let errorMessage = error.message;
@@ -57,6 +75,10 @@ export const signInWithGoogle = async () => {
       errorMessage = 'Sign-in popup was closed. Please try again.';
     } else if (error.code === 'auth/popup-blocked') {
       errorMessage = 'Popup was blocked by browser. Please allow popups for this site.';
+    } else if (error.code === 'auth/invalid-continue-uri') {
+      errorMessage = 'OAuth configuration error. Please ensure localhost:5173 is added to authorized domains in Firebase Console.';
+    } else if (error.code === 'auth/unauthorized-domain') {
+      errorMessage = 'This domain is not authorized. Please contact support.';
     }
     return { success: false, error: errorMessage };
   }
@@ -78,7 +100,11 @@ export const resetPassword = async (email) => {
     await sendPasswordResetEmail(auth, email);
     return { success: true };
   } catch (error) {
-    return { success: false, error: error.message };
+    let errorMessage = error.message;
+    if (error.code === 'auth/invalid-continue-uri') {
+      errorMessage = 'Email configuration error. Please ensure authorized domains are configured in Firebase Console.';
+    }
+    return { success: false, error: errorMessage };
   }
 };
 
