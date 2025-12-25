@@ -23,7 +23,22 @@ export const signInWithEmail = async (email, password) => {
     const userCredential = await signInWithEmailAndPassword(auth, email, password);
     return { success: true, user: userCredential.user };
   } catch (error) {
-    return { success: false, error: error.message };
+    let errorMessage = error.message;
+    
+    // Handle specific error codes
+    if (error.code === 'auth/operation-not-allowed') {
+      errorMessage = 'Email/Password authentication is not enabled. Please contact support or enable it in Firebase Console.';
+    } else if (error.code === 'auth/user-not-found') {
+      errorMessage = 'No account found with this email address.';
+    } else if (error.code === 'auth/wrong-password') {
+      errorMessage = 'Incorrect password. Please try again.';
+    } else if (error.code === 'auth/invalid-email') {
+      errorMessage = 'Invalid email address format.';
+    } else if (error.code === 'auth/too-many-requests') {
+      errorMessage = 'Too many failed attempts. Please try again later.';
+    }
+    
+    return { success: false, error: errorMessage };
   }
 };
 
@@ -41,7 +56,22 @@ export const signUpWithEmail = async (email, password, displayName) => {
     
     return { success: true, user: userCredential.user };
   } catch (error) {
-    return { success: false, error: error.message };
+    let errorMessage = error.message;
+    
+    // Handle specific error codes
+    if (error.code === 'auth/operation-not-allowed') {
+      errorMessage = 'Email/Password authentication is not enabled. Please contact support or enable it in Firebase Console.';
+    } else if (error.code === 'auth/email-already-in-use') {
+      errorMessage = 'An account with this email already exists. Please sign in instead.';
+    } else if (error.code === 'auth/invalid-email') {
+      errorMessage = 'Invalid email address format.';
+    } else if (error.code === 'auth/weak-password') {
+      errorMessage = 'Password is too weak. Please use at least 6 characters.';
+    } else if (error.code === 'auth/too-many-requests') {
+      errorMessage = 'Too many requests. Please try again later.';
+    }
+    
+    return { success: false, error: errorMessage };
   }
 };
 
@@ -71,14 +101,18 @@ export const signInWithGoogle = async () => {
   } catch (error) {
     // Handle specific error cases
     let errorMessage = error.message;
-    if (error.code === 'auth/popup-closed-by-user') {
+    if (error.code === 'auth/operation-not-allowed') {
+      errorMessage = 'Google Sign-In is not enabled. Please enable it in Firebase Console: Authentication > Sign-in method > Google > Enable';
+    } else if (error.code === 'auth/popup-closed-by-user') {
       errorMessage = 'Sign-in popup was closed. Please try again.';
     } else if (error.code === 'auth/popup-blocked') {
       errorMessage = 'Popup was blocked by browser. Please allow popups for this site.';
     } else if (error.code === 'auth/invalid-continue-uri') {
       errorMessage = 'OAuth configuration error. Please ensure localhost:5173 is added to authorized domains in Firebase Console.';
     } else if (error.code === 'auth/unauthorized-domain') {
-      errorMessage = 'This domain is not authorized. Please contact support.';
+      errorMessage = 'This domain is not authorized. Please add it to authorized domains in Firebase Console.';
+    } else if (error.code === 'auth/account-exists-with-different-credential') {
+      errorMessage = 'An account already exists with this email using a different sign-in method. Please use email/password sign-in.';
     }
     return { success: false, error: errorMessage };
   }

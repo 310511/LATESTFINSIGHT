@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 const { uploadToS3, getSignedUrl } = require('../config/s3');
 const AWS = require('aws-sdk');
+const { v4: uuidv4 } = require('uuid');
 
 // Initialize AWS Textract
 const textract = new AWS.Textract({
@@ -68,7 +69,7 @@ async function processDocument(documentId) {
         summary_stats, anomalies, output_files
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
-        require('uuid').v4(),
+        uuidv4(),
         documentId,
         JSON.stringify(categorizedTransactions),
         JSON.stringify(insights),
@@ -223,6 +224,8 @@ function detectAnomalies(transactions) {
   
   // Simple anomaly detection
   // In production, use ML model (Isolation Forest, etc.)
+  if (transactions.length === 0) return anomalies;
+
   const amounts = transactions.map(t => Math.abs(t.amount));
   const mean = amounts.reduce((a, b) => a + b, 0) / amounts.length;
   const stdDev = Math.sqrt(
@@ -339,5 +342,3 @@ function generateCSV(transactions) {
 module.exports = {
   processDocument
 };
-
-

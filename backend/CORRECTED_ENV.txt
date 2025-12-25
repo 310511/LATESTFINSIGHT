@@ -1,0 +1,52 @@
+# ============================================
+# CORRECTED .env FILE FOR BACKEND
+# ============================================
+# Copy this content to LATESTFINSIGHT/backend/.env
+# IMPORTANT: Replace [YOUR-DATABASE-PASSWORD] with your actual password
+# ============================================
+
+# Server Configuration
+PORT=3000
+NODE_ENV=development
+FRONTEND_URL=http://localhost:5173
+
+# Supabase Configuration
+SUPABASE_URL=https://igqocjymgmhygdyvviii.supabase.co
+SUPABASE_PROJECT_REF=igqocjymgmhygdyvviii
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlncW9janltZ21oeWdkeXZ2aWlpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY2NDE3OTgsImV4cCI6MjA4MjIxNzc5OH0.q31NsvlPYUn7WTL-TVzg3yiF_YKAYcrtOafoB1Nqe20
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlncW9janltZ21oeWdkeXZ2aWlpIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NjY0MTc5OCwiZXhwIjoyMDgyMjE3Nzk4fQ.LVhzjGWa3YBP4kiDHmlIb0c_ywK3ScDl7YhhgezW5JA
+
+# Supabase Database Connection - CORRECTED FORMAT
+# ⚠️ CRITICAL: Replace [YOUR-DATABASE-PASSWORD] with your actual database password
+# Get password from: Supabase Dashboard → Settings → Database → Database password
+#
+# CORRECTED: Changed from db.igqocjymgmhygdyvviii.supabase.co 
+#            to aws-0-us-east-1.pooler.supabase.com (connection pooling format)
+SUPABASE_DB_URL=postgresql://postgres.igqocjymgmhygdyvviii:[YOUR-DATABASE-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+
+# Alternative: Direct connection (if pooling doesn't work)
+# SUPABASE_DB_URL=postgresql://postgres.igqocjymgmhygdyvviii:[YOUR-DATABASE-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:5432/postgres
+
+# Alias (optional)
+DATABASE_URL=postgresql://postgres.igqocjymgmhygdyvviii:[YOUR-DATABASE-PASSWORD]@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+
+# AWS S3 Configuration
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your_aws_access_key_here
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key_here
+S3_BUCKET_NAME=finsight-documents-prod
+
+# AWS Textract
+AWS_TEXTRACT_REGION=us-east-1
+
+# Firebase Admin Configuration
+FIREBASE_PROJECT_ID=finsight-78ad1
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY_HERE\n-----END PRIVATE KEY-----\n"
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk@finsight-78ad1.iam.gserviceaccount.com
+
+# JWT Secret
+JWT_SECRET=your_random_jwt_secret_key_change_this_in_production
+
+# Gemini API Key
+GEMINI_API_KEY=AIzaSyDAPN-BPnw8VZJrQnpZrJTd2POTlJ9B7Nw
+

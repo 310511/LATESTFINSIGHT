@@ -35,10 +35,12 @@ router.get('/:userId', verifyToken, async (req, res) => {
     const avgTimeResult = await pool.query(
       `SELECT AVG(EXTRACT(EPOCH FROM (processing_completed_at - processing_started_at))) as avg_time
        FROM documents 
-       WHERE user_id = $1 AND processing_status = 'completed'`,
+       WHERE user_id = $1 AND processing_status = 'completed' 
+       AND processing_started_at IS NOT NULL 
+       AND processing_completed_at IS NOT NULL`,
       [userId]
     );
-    const avgProcessingTime = parseFloat(avgTimeResult.rows[0]?.avg_time || 0) / 1000; // Convert to seconds
+    const avgProcessingTime = parseFloat(avgTimeResult.rows[0]?.avg_time || 0);
 
     // Success rate
     const successRateResult = await pool.query(
@@ -97,5 +99,3 @@ router.get('/:userId', verifyToken, async (req, res) => {
 });
 
 module.exports = router;
-
-

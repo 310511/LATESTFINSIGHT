@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import logo from "../assets/logo.png";
 import {
@@ -15,13 +15,25 @@ import {
   Calendar,
   Filter,
   Search,
+  Loader2,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useAuth } from "../firebase/useAuth";
 import { logOut } from "../firebase/auth";
+import { documentAPI } from "../services/api";
 
 const HistoryPage = () => {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
+  const [historyItems, setHistoryItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalDocuments, setTotalDocuments] = useState(0);
+  const itemsPerPage = 20;
 
   const handleLogout = async () => {
     const result = await logOut();
@@ -30,62 +42,120 @@ const HistoryPage = () => {
     }
   };
 
-  const historyItems = [
-    {
-      id: 1,
-      name: "BankStatement_Jan2025.pdf",
-      type: "Bank Statement",
-      uploadedAt: "2025-01-15 10:24 AM",
-      processedAt: "2025-01-15 10:24 AM",
-      status: "Completed",
-      size: "2.4 MB",
-    },
-    {
-      id: 2,
-      name: "GSTR-3B_Report.xlsx",
-      type: "GST Report",
-      uploadedAt: "2025-01-15 09:10 AM",
-      processedAt: "2025-01-15 09:11 AM",
-      status: "Completed",
-      size: "1.8 MB",
-    },
-    {
-      id: 3,
-      name: "VendorInvoice_1023.pdf",
-      type: "Invoice",
-      uploadedAt: "2025-01-14 03:45 PM",
-      processedAt: "2025-01-14 03:46 PM",
-      status: "Completed",
-      size: "856 KB",
-    },
-    {
-      id: 4,
-      name: "Payroll_Q4_2024.xls",
-      type: "Payroll",
-      uploadedAt: "2025-01-13 11:20 AM",
-      processedAt: "2025-01-13 11:21 AM",
-      status: "Completed",
-      size: "3.2 MB",
-    },
-    {
-      id: 5,
-      name: "TaxReturn_2024.pdf",
-      type: "Tax Document",
-      uploadedAt: "2025-01-12 02:15 PM",
-      processedAt: "2025-01-12 02:16 PM",
-      status: "Completed",
-      size: "1.5 MB",
-    },
-    {
-      id: 6,
-      name: "ExpenseReport_Dec.xlsx",
-      type: "Expense Report",
-      uploadedAt: "2025-01-11 09:30 AM",
-      processedAt: "2025-01-11 09:31 AM",
-      status: "Completed",
-      size: "2.1 MB",
-    },
-  ];
+  // Format file size
+  const formatFileSize = (bytes) => {
+    if (!bytes) return "0 B";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  // Format date
+  const formatDate = (dateString) => {
+    if (!dateString) return "N/A";
+    const date = new Date(dateString);
+    return date.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  // Fetch documents from database
+  const fetchDocuments = async () => {
+    if (!currentUser?.uid) return;
+
+    try {
+      setLoading(true);
+      const params = {
+        page: currentPage,
+        limit: itemsPerPage,
+      };
+
+      if (searchQuery.trim()) {
+        params.search = searchQuery.trim();
+      }
+
+      if (statusFilter !== "all") {
+        params.status = statusFilter;
+      }
+
+      const response = await documentAPI.getHistory(params);
+
+      // Format documents for display
+      const formattedDocs = response.documents?.map((doc) => ({
+        id: doc.document_id,
+        name: doc.original_filename,
+        type: doc.document_type || "Unknown",
+        uploadedAt: formatDate(doc.created_at),
+        processedAt: formatDate(doc.processing_completed_at),
+        status: doc.processing_status === "completed" ? "Completed" :
+                doc.processing_status === "processing" ? "Processing" :
+                doc.processing_status === "failed" ? "Failed" : "Pending",
+        size: formatFileSize(doc.file_size),
+        documentId: doc.document_id,
+        rawStatus: doc.processing_status,
+      })) || [];
+
+      setHistoryItems(formattedDocs);
+      setTotalPages(response.pagination?.total_pages || 1);
+      setTotalDocuments(response.pagination?.total || 0);
+    } catch (error) {
+      console.error("Error fetching documents:", error);
+      setHistoryItems([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch documents on mount and when filters change
+  useEffect(() => {
+    fetchDocuments();
+  }, [currentUser, currentPage, statusFilter]);
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (currentPage === 1) {
+        fetchDocuments();
+      } else {
+        setCurrentPage(1);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Handle document actions
+  const handleViewDocument = (documentId) => {
+    navigate(`/dashboard/results/${documentId}`);
+  };
+
+  const handleDownloadDocument = async (documentId) => {
+    try {
+      const downloadData = await documentAPI.getDownloadUrl(documentId, "pdf");
+      if (downloadData.download_url) {
+        window.open(downloadData.download_url, "_blank");
+      }
+    } catch (error) {
+      console.error("Error downloading document:", error);
+      alert("Failed to download document. Please try again.");
+    }
+  };
+
+  const handleDeleteDocument = async (documentId) => {
+    if (!window.confirm("Are you sure you want to delete this document?")) return;
+
+    try {
+      await documentAPI.delete(documentId);
+      fetchDocuments(); // Refresh the list
+    } catch (error) {
+      console.error("Error deleting document:", error);
+      alert("Failed to delete document. Please try again.");
+    }
+  };
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-[#F8FAFC] via-blue-50/20 to-purple-50/20 font-sans">
@@ -165,14 +235,26 @@ const HistoryPage = () => {
                   <Search className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-[#94A3B8] w-5 h-5" />
                   <input
                     type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search documents..."
                     className="w-full pl-11 pr-4 py-2.5 border border-[#E5E7EB] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/20 focus:border-[#1E40AF] transition-all duration-200"
                   />
                 </div>
-                <button className="flex items-center justify-center gap-2 px-5 py-2.5 border border-[#E5E7EB] rounded-xl hover:bg-[#F8FAFC] hover:border-[#1E40AF]/30 transition-all duration-200 text-sm font-medium text-[#64748B] hover:text-[#0F172A]">
-                  <Filter className="w-4 h-4" />
-                  Filter
-                </button>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  className="flex items-center justify-center gap-2 px-5 py-2.5 border border-[#E5E7EB] rounded-xl hover:bg-[#F8FAFC] hover:border-[#1E40AF]/30 transition-all duration-200 text-sm font-medium text-[#64748B] hover:text-[#0F172A] focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/20"
+                >
+                  <option value="all">All Status</option>
+                  <option value="pending">Pending</option>
+                  <option value="processing">Processing</option>
+                  <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
+                </select>
                 <button className="flex items-center justify-center gap-2 px-5 py-2.5 border border-[#E5E7EB] rounded-xl hover:bg-[#F8FAFC] hover:border-[#1E40AF]/30 transition-all duration-200 text-sm font-medium text-[#64748B] hover:text-[#0F172A]">
                   <Calendar className="w-4 h-4" />
                   Date Range
@@ -184,7 +266,7 @@ const HistoryPage = () => {
             <div className="bg-white rounded-[14px] shadow-[0_1px_3px_rgba(0,0,0,0.08)] border border-[#E5E7EB]/60 overflow-hidden">
               <div className="px-5 lg:px-6 py-4 lg:py-5 border-b border-[#E5E7EB] bg-gradient-to-r from-[#F8FAFC]/50 to-transparent">
                 <h3 className="text-base lg:text-lg font-semibold text-[#0F172A] tracking-[-0.01em] leading-[1.3]">
-                  All Documents ({historyItems.length})
+                  All Documents ({totalDocuments})
                 </h3>
               </div>
 
@@ -202,41 +284,104 @@ const HistoryPage = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E5E7EB]">
-                    {historyItems.map((item) => (
-                      <tr
-                        key={item.id}
-                        className="bg-white hover:bg-[#F8FAFC]/50 transition-colors duration-150"
-                      >
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 font-medium text-[#0F172A]">
-                          {item.name}
-                        </td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.type}</td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.uploadedAt}</td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.processedAt}</td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.size}</td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6">
-                          <span className="inline-flex px-3 py-1.5 text-xs font-semibold rounded-full bg-green-50 text-green-700 border border-green-200">
-                            {item.status}
-                          </span>
-                        </td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6">
-                          <div className="flex items-center gap-2 lg:gap-3">
-                            <button className="p-2 text-[#94A3B8] hover:text-[#1E40AF] hover:bg-[#EFF6FF] rounded-lg transition-all duration-200" title="View">
-                              <Eye className="w-4 h-4" />
-                            </button>
-                            <button className="p-2 text-[#94A3B8] hover:text-green-600 hover:bg-green-50 rounded-lg transition-all duration-200" title="Download">
-                              <Download className="w-4 h-4" />
-                            </button>
-                            <button className="p-2 text-[#94A3B8] hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200" title="Delete">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
+                    {loading ? (
+                      <tr>
+                        <td colSpan="7" className="py-8 text-center">
+                          <Loader2 className="w-6 h-6 animate-spin text-blue-600 mx-auto" />
                         </td>
                       </tr>
-                    ))}
+                    ) : historyItems.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" className="py-8 text-center text-gray-500">
+                          No documents found. Upload your first document to get started!
+                        </td>
+                      </tr>
+                    ) : (
+                      historyItems.map((item) => (
+                        <tr
+                          key={item.id}
+                          className="bg-white hover:bg-[#F8FAFC]/50 transition-colors duration-150"
+                        >
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 font-medium text-[#0F172A]">
+                            {item.name}
+                          </td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.type}</td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.uploadedAt}</td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.processedAt}</td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#64748B]">{item.size}</td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6">
+                            <span
+                              className={`inline-flex px-3 py-1.5 text-xs font-semibold rounded-full border ${
+                                item.status === "Completed"
+                                  ? "bg-green-50 text-green-700 border-green-200"
+                                  : item.status === "Failed"
+                                  ? "bg-red-50 text-red-700 border-red-200"
+                                  : item.status === "Processing"
+                                  ? "bg-yellow-50 text-yellow-700 border-yellow-200"
+                                  : "bg-gray-50 text-gray-700 border-gray-200"
+                              }`}
+                            >
+                              {item.status}
+                            </span>
+                          </td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6">
+                            <div className="flex items-center gap-2 lg:gap-3">
+                              <button
+                                onClick={() => handleViewDocument(item.documentId)}
+                                className="p-2 text-[#94A3B8] hover:text-[#1E40AF] hover:bg-[#EFF6FF] rounded-lg transition-all duration-200"
+                                title="View"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              {item.status === "Completed" && (
+                                <button
+                                  onClick={() => handleDownloadDocument(item.documentId)}
+                                  className="p-2 text-[#94A3B8] hover:text-green-600 hover:bg-green-50 rounded-lg transition-all duration-200"
+                                  title="Download"
+                                >
+                                  <Download className="w-4 h-4" />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleDeleteDocument(item.documentId)}
+                                className="p-2 text-[#94A3B8] hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="px-5 lg:px-6 py-4 border-t border-[#E5E7EB] flex items-center justify-between">
+                  <div className="text-sm text-[#64748B]">
+                    Page {currentPage} of {totalPages}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                      disabled={currentPage === 1}
+                      className="p-2 border border-[#E5E7EB] rounded-lg hover:bg-[#F8FAFC] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                      disabled={currentPage === totalPages}
+                      className="p-2 border border-[#E5E7EB] rounded-lg hover:bg-[#F8FAFC] disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

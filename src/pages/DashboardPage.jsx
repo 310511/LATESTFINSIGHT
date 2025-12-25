@@ -19,9 +19,11 @@ import {
   CheckCircle,
   AlertCircle,
   X,
+  Loader2,
 } from "lucide-react";
 import { useAuth } from "../firebase/useAuth";
 import { logOut } from "../firebase/auth";
+import { analyticsAPI, documentAPI } from "../services/api";
 
 const DashboardPage = () => {
   const navigate = useNavigate();
@@ -31,41 +33,153 @@ const DashboardPage = () => {
   const notificationsRef = useRef(null);
   const profileMenuRef = useRef(null);
 
-  // Mock notifications data
-  const [notifications, setNotifications] = useState([
-    {
-      id: 1,
-      type: "success",
-      title: "Document Processed",
-      message: "BankStatement_Jan2025.pdf has been successfully processed",
-      time: "2 minutes ago",
-      read: false,
-    },
-    {
-      id: 2,
-      type: "info",
-      title: "New Feature Available",
-      message: "Check out our new PDF export feature",
-      time: "1 hour ago",
-      read: false,
-    },
-    {
-      id: 3,
-      type: "warning",
-      title: "Processing Delayed",
-      message: "GSTR-3B_Report.xlsx is taking longer than expected",
-      time: "3 hours ago",
-      read: true,
-    },
-    {
-      id: 4,
-      type: "success",
-      title: "Document Processed",
-      message: "VendorInvoice_1023.pdf has been successfully processed",
-      time: "Yesterday",
-      read: true,
-    },
-  ]);
+  // Real notifications generated from document status
+  const [notifications, setNotifications] = useState([]);
+  const [analytics, setAnalytics] = useState([]);
+  const [recentUploads, setRecentUploads] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch real data from database
+  useEffect(() => {
+    const fetchDashboardData = async () => {
+      if (!currentUser?.uid) return;
+      
+      try {
+        setLoading(true);
+        
+        // Fetch analytics
+        const analyticsData = await analyticsAPI.getAnalytics(currentUser.uid);
+        
+        // Format analytics for display
+        setAnalytics([
+          {
+            title: "Total Documents Processed",
+            value: analyticsData.analytics?.total_documents?.toLocaleString() || "0",
+            icon: <FileText className="w-6 h-6 text-blue-500" />,
+          },
+          {
+            title: "Today's Files",
+            value: analyticsData.analytics?.today_files?.toLocaleString() || "0",
+            icon: <Upload className="w-6 h-6 text-purple-500" />,
+          },
+          {
+            title: "Avg Processing Time",
+            value: analyticsData.analytics?.avg_processing_time 
+              ? `${analyticsData.analytics.avg_processing_time.toFixed(1)}s`
+              : "0s",
+            icon: <Clock className="w-6 h-6 text-green-500" />,
+          },
+          {
+            title: "Success Rate",
+            value: analyticsData.analytics?.success_rate 
+              ? `${analyticsData.analytics.success_rate}%`
+              : "0%",
+            icon: <TrendingUp className="w-6 h-6 text-emerald-500" />,
+          },
+        ]);
+
+        // Fetch recent documents
+        const documentsData = await documentAPI.getHistory({ page: 1, limit: 10 });
+        
+        // Format documents for display
+        const formattedDocs = documentsData.documents?.map((doc) => {
+          const uploadDate = new Date(doc.created_at);
+          const now = new Date();
+          const diffMs = now - uploadDate;
+          const diffMins = Math.floor(diffMs / 60000);
+          const diffHours = Math.floor(diffMs / 3600000);
+          const diffDays = Math.floor(diffMs / 86400000);
+
+          let timeStr = "";
+          if (diffMins < 1) timeStr = "Just now";
+          else if (diffMins < 60) timeStr = `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+          else if (diffHours < 24) timeStr = `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+          else if (diffDays === 1) timeStr = "Yesterday";
+          else if (diffDays < 7) timeStr = `${diffDays} days ago`;
+          else timeStr = uploadDate.toLocaleDateString();
+
+          return {
+            id: doc.document_id,
+            name: doc.original_filename,
+            time: timeStr,
+            status: doc.processing_status === 'completed' ? 'Completed' : 
+                   doc.processing_status === 'processing' ? 'Processing' :
+                   doc.processing_status === 'failed' ? 'Failed' : 'Pending',
+            documentId: doc.document_id,
+          };
+        }) || [];
+
+        setRecentUploads(formattedDocs);
+
+        // Generate notifications from recent documents
+        const recentDocs = formattedDocs.slice(0, 5);
+        const generatedNotifications = recentDocs.map((doc, index) => {
+          let type = "info";
+          let title = "Document Uploaded";
+          let message = `${doc.name} has been uploaded`;
+
+          if (doc.status === "Completed") {
+            type = "success";
+            title = "Document Processed";
+            message = `${doc.name} has been successfully processed`;
+          } else if (doc.status === "Failed") {
+            type = "warning";
+            title = "Processing Failed";
+            message = `${doc.name} processing failed. Please try again.`;
+          } else if (doc.status === "Processing") {
+            type = "info";
+            title = "Processing";
+            message = `${doc.name} is being processed`;
+          }
+
+          return {
+            id: doc.id || index,
+            type,
+            title,
+            message,
+            time: doc.time,
+            read: index > 2, // Mark older notifications as read
+            documentId: doc.documentId,
+          };
+        });
+
+        setNotifications(generatedNotifications);
+      } catch (error) {
+        console.error("Error fetching dashboard data:", error);
+        // Set default values on error
+        setAnalytics([
+          {
+            title: "Total Documents Processed",
+            value: "0",
+            icon: <FileText className="w-6 h-6 text-blue-500" />,
+          },
+          {
+            title: "Today's Files",
+            value: "0",
+            icon: <Upload className="w-6 h-6 text-purple-500" />,
+          },
+          {
+            title: "Avg Processing Time",
+            value: "0s",
+            icon: <Clock className="w-6 h-6 text-green-500" />,
+          },
+          {
+            title: "Success Rate",
+            value: "0%",
+            icon: <TrendingUp className="w-6 h-6 text-emerald-500" />,
+          },
+        ]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchDashboardData();
+    
+    // Refresh data every 30 seconds
+    const interval = setInterval(fetchDashboardData, 30000);
+    return () => clearInterval(interval);
+  }, [currentUser]);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -107,51 +221,62 @@ const DashboardPage = () => {
     }
   };
 
-  const analytics = [
-    {
-      title: "Total Documents Processed",
-      value: "1,248",
-      icon: <FileText className="w-6 h-6 text-blue-500" />,
-    },
-    {
-      title: "Today's Files",
-      value: "26",
-      icon: <Upload className="w-6 h-6 text-purple-500" />,
-    },
-    {
-      title: "Avg Processing Time",
-      value: "3.4s",
-      icon: <Clock className="w-6 h-6 text-green-500" />,
-    },
-    {
-      title: "Success Rate",
-      value: "98.7%",
-      icon: <TrendingUp className="w-6 h-6 text-emerald-500" />,
-    },
-  ];
+  // Handle document actions
+  const handleViewDocument = (documentId) => {
+    navigate(`/dashboard/results/${documentId}`);
+  };
 
-  const recentUploads = [
-    {
-      name: "BankStatement_Jan2025.pdf",
-      time: "10:24 AM",
-      status: "Completed",
-    },
-    {
-      name: "GSTR-3B_Report.xlsx",
-      time: "09:10 AM",
-      status: "Processing",
-    },
-    {
-      name: "VendorInvoice_1023.pdf",
-      time: "Yesterday",
-      status: "Completed",
-    },
-    {
-      name: "Payroll_Q4_2024.xls",
-      time: "2 days ago",
-      status: "Completed",
-    },
-  ];
+  const handleDownloadDocument = async (documentId) => {
+    try {
+      const downloadData = await documentAPI.getDownloadUrl(documentId, 'pdf');
+      if (downloadData.download_url) {
+        window.open(downloadData.download_url, '_blank');
+      }
+    } catch (error) {
+      console.error("Error downloading document:", error);
+      alert("Failed to download document. Please try again.");
+    }
+  };
+
+  const handleDeleteDocument = async (documentId) => {
+    if (!window.confirm("Are you sure you want to delete this document?")) return;
+    
+    try {
+      await documentAPI.delete(documentId);
+      // Refresh the list
+      const documentsData = await documentAPI.getHistory({ page: 1, limit: 10 });
+      const formattedDocs = documentsData.documents?.map((doc) => {
+        const uploadDate = new Date(doc.created_at);
+        const now = new Date();
+        const diffMs = now - uploadDate;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+
+        let timeStr = "";
+        if (diffMins < 1) timeStr = "Just now";
+        else if (diffMins < 60) timeStr = `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+        else if (diffHours < 24) timeStr = `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+        else if (diffDays === 1) timeStr = "Yesterday";
+        else if (diffDays < 7) timeStr = `${diffDays} days ago`;
+        else timeStr = uploadDate.toLocaleDateString();
+
+        return {
+          id: doc.document_id,
+          name: doc.original_filename,
+          time: timeStr,
+          status: doc.processing_status === 'completed' ? 'Completed' : 
+                 doc.processing_status === 'processing' ? 'Processing' :
+                 doc.processing_status === 'failed' ? 'Failed' : 'Pending',
+          documentId: doc.document_id,
+        };
+      }) || [];
+      setRecentUploads(formattedDocs);
+    } catch (error) {
+      console.error("Error deleting document:", error);
+      alert("Failed to delete document. Please try again.");
+    }
+  };
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-[#F8FAFC] via-blue-50/20 to-purple-50/20 font-sans">
@@ -256,7 +381,13 @@ const DashboardPage = () => {
                         {notifications.map((notification) => (
                           <div
                             key={notification.id}
-                            className={`px-4 py-3 hover:bg-gray-50 transition-colors ${
+                            onClick={() => {
+                              if (notification.documentId) {
+                                navigate(`/dashboard/results/${notification.documentId}`);
+                                setNotificationsOpen(false);
+                              }
+                            }}
+                            className={`px-4 py-3 hover:bg-gray-50 transition-colors cursor-pointer ${
                               !notification.read ? 'bg-blue-50/50' : ''
                             }`}
                           >
@@ -408,6 +539,11 @@ const DashboardPage = () => {
         <div className="flex-1 overflow-y-auto p-6 lg:p-8">
           <div className="max-w-7xl mx-auto space-y-6 lg:space-y-8">
             {/* ---- A. ANALYTICS CARDS ---- */}
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+              </div>
+            ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
             {analytics.map((card, i) => (
               <div
@@ -428,6 +564,7 @@ const DashboardPage = () => {
               </div>
             ))}
           </div>
+            )}
 
             {/* ---- B. RECENT UPLOADS TABLE ---- */}
             <div className="bg-[#FFFFFF] rounded-[14px] shadow-[0_1px_3px_rgba(0,0,0,0.08)] border border-[#E5E7EB]/60 overflow-hidden">
@@ -448,41 +585,71 @@ const DashboardPage = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E5E7EB]">
-                    {recentUploads.map((file, index) => (
-                      <tr
-                        key={index}
-                        className="bg-[#FFFFFF] hover:bg-blue-50/30 transition-colors duration-150"
-                      >
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 font-medium text-[#0F172A]">
-                          {file.name}
-                        </td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#475569]">{file.time}</td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6">
-                          <span
-                            className={`inline-flex px-3 py-1.5 text-xs font-semibold rounded-full ${
-                              file.status === "Completed"
-                                ? "bg-green-50 text-green-700 border border-green-200"
-                                : "bg-yellow-50 text-yellow-700 border border-yellow-200"
-                            }`}
-                          >
-                            {file.status}
-                          </span>
-                        </td>
-                        <td className="py-3 lg:py-4 px-4 lg:px-6">
-                          <div className="flex items-center space-x-2 lg:space-x-3">
-                            <button className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all duration-200" title="View">
-                              <Eye className="w-4 h-4" />
-                            </button>
-                            <button className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-all duration-200" title="Download">
-                              <Download className="w-4 h-4" />
-                            </button>
-                            <button className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200" title="Delete">
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
+                    {loading ? (
+                      <tr>
+                        <td colSpan="4" className="py-8 text-center">
+                          <Loader2 className="w-6 h-6 animate-spin text-blue-600 mx-auto" />
                         </td>
                       </tr>
-                    ))}
+                    ) : recentUploads.length === 0 ? (
+                      <tr>
+                        <td colSpan="4" className="py-8 text-center text-gray-500">
+                          No documents uploaded yet. Upload your first document to get started!
+                        </td>
+                      </tr>
+                    ) : (
+                      recentUploads.map((file, index) => (
+                        <tr
+                          key={file.id || index}
+                          className="bg-[#FFFFFF] hover:bg-blue-50/30 transition-colors duration-150"
+                        >
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 font-medium text-[#0F172A]">
+                            {file.name}
+                          </td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6 text-[#475569]">{file.time}</td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6">
+                            <span
+                              className={`inline-flex px-3 py-1.5 text-xs font-semibold rounded-full ${
+                                file.status === "Completed"
+                                  ? "bg-green-50 text-green-700 border border-green-200"
+                                  : file.status === "Failed"
+                                  ? "bg-red-50 text-red-700 border border-red-200"
+                                  : "bg-yellow-50 text-yellow-700 border border-yellow-200"
+                              }`}
+                            >
+                              {file.status}
+                            </span>
+                          </td>
+                          <td className="py-3 lg:py-4 px-4 lg:px-6">
+                            <div className="flex items-center space-x-2 lg:space-x-3">
+                              <button 
+                                onClick={() => handleViewDocument(file.documentId)}
+                                className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all duration-200" 
+                                title="View"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              {file.status === "Completed" && (
+                                <button 
+                                  onClick={() => handleDownloadDocument(file.documentId)}
+                                  className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-all duration-200" 
+                                  title="Download"
+                                >
+                                  <Download className="w-4 h-4" />
+                                </button>
+                              )}
+                              <button 
+                                onClick={() => handleDeleteDocument(file.documentId)}
+                                className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all duration-200" 
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -496,10 +663,16 @@ const DashboardPage = () => {
               >
                 Upload Document
               </button>
-              <button className="border-2 border-[#E5E7EB] hover:border-[#E5E7EB] text-[#475569] px-6 py-3 rounded-xl font-semibold hover:bg-[#F8FAFC] transition-all duration-200 shadow-sm hover:shadow-md">
+              <button 
+                onClick={() => navigate("/dashboard/history")}
+                className="border-2 border-[#E5E7EB] hover:border-[#E5E7EB] text-[#475569] px-6 py-3 rounded-xl font-semibold hover:bg-[#F8FAFC] transition-all duration-200 shadow-sm hover:shadow-md"
+              >
                 View All Documents
               </button>
-              <button className="border-2 border-blue-200 hover:border-blue-300 text-[#2563EB] px-6 py-3 rounded-xl font-semibold hover:bg-blue-50 transition-all duration-200 shadow-sm hover:shadow-md">
+              <button 
+                onClick={() => navigate("/dashboard/support")}
+                className="border-2 border-blue-200 hover:border-blue-300 text-[#2563EB] px-6 py-3 rounded-xl font-semibold hover:bg-blue-50 transition-all duration-200 shadow-sm hover:shadow-md"
+              >
                 Support
               </button>
             </div>

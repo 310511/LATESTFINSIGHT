@@ -106,7 +106,7 @@ router.put('/:userId/settings',
                push_notifications = COALESCE($2, push_notifications),
                dark_mode = COALESCE($3, dark_mode),
                preferred_export_format = COALESCE($4, preferred_export_format),
-               updated_at = NOW()
+               updated_at = CURRENT_TIMESTAMP
            WHERE user_id = $5`,
           [email_notifications, push_notifications, dark_mode, preferred_export_format, userId]
         );
@@ -127,5 +127,3 @@ router.put('/:userId/settings',
 );
 
 module.exports = router;
-
-

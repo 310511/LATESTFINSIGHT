@@ -15,14 +15,21 @@ import {
   Send,
   Search,
   ChevronRight,
+  Loader2,
+  CheckCircle,
 } from "lucide-react";
 import { useAuth } from "../firebase/useAuth";
 import { logOut } from "../firebase/auth";
+import { supportAPI } from "../services/api";
 
 const SupportPage = () => {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
+  const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [submitError, setSubmitError] = useState("");
 
   const handleLogout = async () => {
     const result = await logOut();
@@ -31,11 +38,50 @@ const SupportPage = () => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    if (message.trim()) {
-      alert("Your message has been sent! We'll get back to you soon.");
-      setMessage("");
+    
+    if (!subject.trim()) {
+      setSubmitError("Please enter a subject");
+      return;
+    }
+    
+    if (!message.trim()) {
+      setSubmitError("Please enter a message");
+      return;
+    }
+
+    if (!currentUser?.uid) {
+      setSubmitError("You must be logged in to submit a support ticket");
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setSubmitError("");
+      
+      const response = await supportAPI.createTicket({
+        subject: subject.trim(),
+        message: message.trim(),
+      });
+
+      if (response.success) {
+        setSubmitSuccess(true);
+        setSubject("");
+        setMessage("");
+        
+        // Reset success message after 5 seconds
+        setTimeout(() => {
+          setSubmitSuccess(false);
+        }, 5000);
+      } else {
+        setSubmitError(response.error || "Failed to submit ticket. Please try again.");
+      }
+    } catch (error) {
+      console.error("Error submitting support ticket:", error);
+      setSubmitError(error.message || "Failed to submit ticket. Please try again.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -154,10 +200,39 @@ const SupportPage = () => {
               <p className="text-[#64748B] mb-4 leading-[1.6]">
                 Have a question or need help? Send us a message and we'll get back to you as soon as possible.
               </p>
+              
+              {submitSuccess && (
+                <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-xl flex items-center gap-3">
+                  <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0" />
+                  <p className="text-sm text-green-700">
+                    Your support ticket has been submitted successfully! We'll get back to you soon.
+                  </p>
+                </div>
+              )}
+
+              {submitError && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-xl">
+                  <p className="text-sm text-red-700">{submitError}</p>
+                </div>
+              )}
+
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-sm font-semibold text-[#0F172A] mb-2 tracking-[-0.01em]">
-                    Your Message
+                    Subject <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    className="w-full px-4 py-3 border-2 border-[#E5E7EB] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/20 focus:border-[#1E40AF] transition-all duration-200"
+                    placeholder="Enter a subject for your ticket..."
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-[#0F172A] mb-2 tracking-[-0.01em]">
+                    Your Message <span className="text-red-500">*</span>
                   </label>
                   <textarea
                     value={message}
@@ -165,14 +240,25 @@ const SupportPage = () => {
                     rows={4}
                     className="w-full px-4 py-3 border-2 border-[#E5E7EB] rounded-xl focus:outline-none focus:ring-2 focus:ring-[#1E40AF]/20 focus:border-[#1E40AF] transition-all duration-200 resize-none"
                     placeholder="Describe your issue or question..."
+                    required
                   />
                 </div>
                 <button
                   type="submit"
-                  className="flex items-center gap-2 bg-gradient-to-r from-[#1E40AF] to-[#7C3AED] text-white px-6 py-3 rounded-xl font-semibold hover:from-[#1E3A8A] hover:to-[#7C3AED] shadow-[0_4px_12px_rgba(30,64,175,0.3)] hover:shadow-[0_6px_16px_rgba(30,64,175,0.4)] transform hover:scale-[1.02] transition-all duration-200"
+                  disabled={isSubmitting}
+                  className="flex items-center gap-2 bg-gradient-to-r from-[#1E40AF] to-[#7C3AED] text-white px-6 py-3 rounded-xl font-semibold hover:from-[#1E3A8A] hover:to-[#7C3AED] shadow-[0_4px_12px_rgba(30,64,175,0.3)] hover:shadow-[0_6px_16px_rgba(30,64,175,0.4)] transform hover:scale-[1.02] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
                 >
-                  <Send className="w-5 h-5" />
-                  Send Message
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Submitting...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-5 h-5" />
+                      Send Message
+                    </>
+                  )}
                 </button>
               </form>
             </div>

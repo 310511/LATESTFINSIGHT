@@ -83,7 +83,7 @@ router.post('/upload', verifyToken, upload.single('file'), async (req, res) => {
         filename: req.file.originalname,
         file_size: req.file.size,
         status: 'pending',
-        uploaded_at: new Date().toISOString()
+        uploaded_at: result.rows[0].created_at
       }
     });
   } catch (error) {
@@ -197,7 +197,9 @@ router.get('/:documentId/results', verifyToken, async (req, res) => {
     // Generate signed URLs for output files
     const outputFiles = {};
     if (results.output_files) {
-      const files = JSON.parse(results.output_files);
+      const files = typeof results.output_files === 'string' 
+        ? JSON.parse(results.output_files) 
+        : results.output_files;
       for (const [format, key] of Object.entries(files)) {
         outputFiles[format] = await getSignedUrl(key, 3600); // 1 hour expiry
       }
@@ -206,10 +208,18 @@ router.get('/:documentId/results', verifyToken, async (req, res) => {
     res.json({
       success: true,
       document_id: documentId,
-      extracted_data: results.extracted_data ? JSON.parse(results.extracted_data) : null,
-      insights: results.insights ? JSON.parse(results.insights) : null,
-      summary_stats: results.summary_stats ? JSON.parse(results.summary_stats) : null,
-      anomalies: results.anomalies ? JSON.parse(results.anomalies) : null,
+      extracted_data: typeof results.extracted_data === 'string' 
+        ? JSON.parse(results.extracted_data) 
+        : results.extracted_data,
+      insights: typeof results.insights === 'string' 
+        ? JSON.parse(results.insights) 
+        : results.insights,
+      summary_stats: typeof results.summary_stats === 'string' 
+        ? JSON.parse(results.summary_stats) 
+        : results.summary_stats,
+      anomalies: typeof results.anomalies === 'string' 
+        ? JSON.parse(results.anomalies) 
+        : results.anomalies,
       output_files: outputFiles,
       processed_at: results.created_at
     });
@@ -313,7 +323,9 @@ router.get('/:documentId/download', verifyToken, async (req, res) => {
       });
     }
 
-    const outputFiles = JSON.parse(resultsResult.rows[0].output_files);
+    const outputFiles = typeof resultsResult.rows[0].output_files === 'string'
+      ? JSON.parse(resultsResult.rows[0].output_files)
+      : resultsResult.rows[0].output_files;
     const fileKey = outputFiles[format];
 
     if (!fileKey) {
@@ -385,5 +397,3 @@ router.delete('/:documentId', verifyToken, async (req, res) => {
 });
 
 module.exports = router;
-
-

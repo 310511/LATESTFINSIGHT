@@ -12,7 +12,7 @@ router.post('/contact',
   [
     body('subject').notEmpty().withMessage('Subject is required'),
     body('message').notEmpty().withMessage('Message is required'),
-    body('document_id').optional().isUUID()
+    body('document_id').optional().isString()
   ],
   async (req, res) => {
     try {
@@ -55,5 +55,3 @@ router.post('/contact',
 );
 
 module.exports = router;
-
-
