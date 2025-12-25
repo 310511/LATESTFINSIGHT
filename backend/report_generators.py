@@ -1081,13 +1081,63 @@ def generate_trial_balance_reports(base_data, text):
             "opex_ratio": round(monthly_opex_ratio, 2)
         })
     
-    # 1. Profit & Loss Statement with enhanced data
+    # 1. Profit & Loss Statement with enhanced data - structured for IncomeStatementTable component
+    # Extract detailed expense breakdown from expense accounts
+    cost_of_material_consumed = 0
+    employee_benefits_expense = 0
+    finance_costs = 0
+    depreciation_amortisation = 0
+    other_income = 0
+    
+    for exp in expense_accounts:
+        exp_name = exp.get("name", "").lower()
+        exp_amount = exp.get("amount", 0)
+        if "material" in exp_name or "cogs" in exp_name or "cost of goods" in exp_name:
+            cost_of_material_consumed += exp_amount
+        elif "employee" in exp_name or "salary" in exp_name or "wages" in exp_name or "staff" in exp_name:
+            employee_benefits_expense += exp_amount
+        elif "finance" in exp_name or "interest" in exp_name or "loan" in exp_name:
+            finance_costs += exp_amount
+        elif "depreciation" in exp_name or "amortisation" in exp_name or "amortization" in exp_name:
+            depreciation_amortisation += exp_amount
+    
+    # Extract other income from income accounts (excluding main revenue)
+    for inc in income_accounts:
+        inc_name = inc.get("name", "").lower()
+        inc_amount = inc.get("amount", 0)
+        if "other" in inc_name or "miscellaneous" in inc_name or "interest" in inc_name:
+            other_income += inc_amount
+    
+    # Use COGS for cost_of_material_consumed if available, otherwise use extracted value
+    if cogs > 0:
+        cost_of_material_consumed = cogs if cost_of_material_consumed == 0 else cost_of_material_consumed
+    
+    # Calculate operating profit (gross profit - operating expenses excluding COGS)
+    operating_expenses = employee_benefits_expense + finance_costs + depreciation_amortisation + other_expenses
+    operating_profit = gross_profit - operating_expenses
+    profit_before_tax = operating_profit  # Simplified - assuming no non-operating items
+    profit_for_year = net_profit  # Assuming net_profit is after tax
+    
     reports["profit_loss"] = {
         "revenue": total_revenue,
         "cogs": cogs,
         "gross_profit": gross_profit,
         "expenses": total_expenses,
         "net_profit": net_profit,
+        "operating_profit": operating_profit,
+        "profit_before_tax": profit_before_tax,
+        "profit_for_year": profit_for_year,
+        "cost_of_material_consumed": cost_of_material_consumed,
+        "employee_benefits_expense": employee_benefits_expense,
+        "finance_costs": finance_costs,
+        "depreciation_amortisation": depreciation_amortisation,
+        "other_expenses": other_expenses,
+        "other_income": other_income,
+        "prior_period_income_expense": 0,  # Not typically in trial balance
+        "current_tax": 0,  # Would need to extract from accounts
+        "deferred_tax": 0,  # Would need to extract from accounts
+        "tax_adjustments": 0,  # Would need to extract from accounts
+        "earnings_per_share": 0,  # Would need share capital data
         "opex_breakdown": {
             "sales": sales_expenses,
             "marketing": marketing_expenses,
@@ -1095,27 +1145,143 @@ def generate_trial_balance_reports(base_data, text):
             "other": other_expenses
         },
         "monthly_data": monthly_data,
-        "other_income": 0,  # Can be extracted from income_accounts if needed
-        "other_expenses": other_expenses
+        "period": base_data.get("period", ""),
+        "company_name": base_data.get("entity_name", "XYZ")
     }
     
-    # 2. Balance Sheet
+    # 2. Balance Sheet - structured for BalanceSheetTable component
+    # Extract detailed asset breakdown
+    share_capital = equity_dict.get("Share Capital", 0) or equity_dict.get("Capital", 0) or 0
+    reserves_and_surplus = equity_dict.get("Reserves and Surplus", 0) or equity_dict.get("Reserves", 0) or 0
+    
+    # Map liabilities
+    long_term_borrowings = 0
+    short_term_borrowings = 0
+    trade_payables = accounts_payable
+    deferred_tax_liabilities = liabilities_dict.get("Deferred Tax Liabilities", 0) or 0
+    long_term_provisions = 0
+    short_term_provisions = 0
+    other_current_liabilities = 0
+    other_non_current_liabilities = 0
+    
+    for k, v in liabilities_dict.items():
+        k_lower = k.lower()
+        if "loan" in k_lower or "borrowing" in k_lower:
+            if "short" in k_lower or "current" in k_lower:
+                short_term_borrowings += v
+            else:
+                long_term_borrowings += v
+        elif "provision" in k_lower:
+            if "short" in k_lower or "current" in k_lower:
+                short_term_provisions += v
+            else:
+                long_term_provisions += v
+        elif "payable" not in k_lower and "tax" not in k_lower:
+            if "short" in k_lower or "current" in k_lower:
+                other_current_liabilities += v
+            else:
+                other_non_current_liabilities += v
+    
+    # Map assets
+    property_plant_equipment = 0
+    capital_work_in_progress = 0
+    non_current_investments = 0
+    deferred_tax_assets = assets_dict.get("Deferred Tax Assets", 0) or 0
+    long_term_loans_and_advances = 0
+    other_non_current_assets = 0
+    trade_receivables_mapped = accounts_receivable
+    cash_and_bank_balances = cash_in_hand + bank_account
+    short_term_loans_and_advances = 0
+    other_current_assets = 0
+    
+    for k, v in assets_dict.items():
+        k_lower = k.lower()
+        if "property" in k_lower or "plant" in k_lower or "equipment" in k_lower or "fixed asset" in k_lower:
+            property_plant_equipment += v
+        elif "work in progress" in k_lower or "cwip" in k_lower:
+            capital_work_in_progress += v
+        elif "investment" in k_lower:
+            if "short" in k_lower or "current" in k_lower:
+                other_current_assets += v
+            else:
+                non_current_investments += v
+        elif "loan" in k_lower or "advance" in k_lower:
+            if "short" in k_lower or "current" in k_lower:
+                short_term_loans_and_advances += v
+            else:
+                long_term_loans_and_advances += v
+        elif k not in ["Cash in Hand", "Cash", "Bank Account", "Bank", "Accounts Receivable", "Receivables", "Inventory", "Stock"]:
+            if "short" in k_lower or "current" in k_lower:
+                other_current_assets += v
+            else:
+                other_non_current_assets += v
+    
     reports["balance_sheet"] = {
         "assets": assets_dict,
         "liabilities": liabilities_dict,
         "equity": equity_dict,
         "total_assets": total_assets,
         "total_liabilities": total_liabilities,
-        "total_equity": total_equity
+        "total_equity": total_equity,
+        # Detailed fields for BalanceSheetTable component
+        "share_capital": share_capital,
+        "reserves_and_surplus": reserves_and_surplus,
+        "long_term_borrowings": long_term_borrowings,
+        "short_term_borrowings": short_term_borrowings,
+        "trade_payables": trade_payables,
+        "deferred_tax_liabilities": deferred_tax_liabilities,
+        "long_term_provisions": long_term_provisions,
+        "short_term_provisions": short_term_provisions,
+        "other_current_liabilities": other_current_liabilities,
+        "other_non_current_liabilities": other_non_current_liabilities,
+        "property_plant_equipment": property_plant_equipment,
+        "capital_work_in_progress": capital_work_in_progress,
+        "non_current_investments": non_current_investments,
+        "deferred_tax_assets": deferred_tax_assets,
+        "long_term_loans_and_advances": long_term_loans_and_advances,
+        "other_non_current_assets": other_non_current_assets,
+        "inventories": inventory,
+        "trade_receivables": trade_receivables_mapped,
+        "cash_and_bank_balances": cash_and_bank_balances,
+        "short_term_loans_and_advances": short_term_loans_and_advances,
+        "other_current_assets": other_current_assets,
+        "period": base_data.get("period", ""),
+        "company_name": base_data.get("entity_name", "XYZ")
     }
     
-    # 3. Cash Flow Statement
-    operating_cash_flow = net_profit  # Simplified
+    # 3. Cash Flow Statement - structured for CashFlowStatementTable component
+    # Calculate cash flow components
+    operating_cash_flow = net_profit  # Simplified - starting with net profit
+    net_cash_from_operating = operating_cash_flow + depreciation_amortisation  # Add back non-cash expenses
+    
+    # Cash at beginning and end (simplified)
+    cash_at_beginning = cash_and_bank_balances - net_cash_from_operating  # Approximate
+    if cash_at_beginning < 0:
+        cash_at_beginning = 0
+    cash_at_end = cash_and_bank_balances
+    
     reports["cash_flow"] = {
         "operating_activities": operating_cash_flow,
         "investing_activities": 0,
         "financing_activities": 0,
-        "net_cash_flow": operating_cash_flow
+        "net_cash_flow": operating_cash_flow,
+        # Detailed fields for CashFlowStatementTable component
+        "net_profit_before_tax": profit_before_tax,
+        "depreciation": depreciation_amortisation,
+        "interest_expense": finance_costs,
+        "operating_profit_before_wc": operating_profit,
+        "increase_decrease_inventories": 0,  # Would need period comparison
+        "increase_decrease_trade_receivables": 0,  # Would need period comparison
+        "increase_decrease_trade_payables": 0,  # Would need period comparison
+        "cash_generated_used_operating": net_cash_from_operating,
+        "income_tax_paid": 0,  # Would need to extract from accounts
+        "purchase_of_fixed_assets": 0,  # Would need period comparison
+        "proceeds_from_sale_fixed_assets": 0,  # Would need period comparison
+        "net_increase_decrease_cash": net_cash_from_operating,
+        "cash_at_beginning": cash_at_beginning,
+        "cash_at_end": cash_at_end,
+        "period": base_data.get("period", ""),
+        "company_name": base_data.get("entity_name", "XYZ")
     }
     
     # 4. Calculate Financial Ratios

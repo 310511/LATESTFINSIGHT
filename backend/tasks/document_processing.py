@@ -198,6 +198,29 @@ def process_document_task(self, file_data: Dict, document_type: Optional[str] = 
             "filename": filename
         }
         
+        # Cache the complete result if Redis is available
+        try:
+            import redis
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            
+            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+            redis_client_cache = redis.from_url(redis_url, decode_responses=True)
+            
+            # Generate cache key from original file content
+            file_content = base64.b64decode(file_data['content'])
+            import hashlib
+            file_hash = hashlib.sha256(file_content).hexdigest()
+            doc_type_str = document_type or "auto"
+            doc_cache_key = f"document_cache:{file_hash}:{doc_type_str}"
+            
+            # Cache for 7 days (604800 seconds)
+            redis_client_cache.setex(doc_cache_key, 604800, json.dumps(final_result))
+            print(f"✓ Cached complete document result in task (key: {doc_cache_key[:30]}..., TTL: 7 days)")
+        except Exception as cache_error:
+            print(f"Warning: Could not cache result in task: {str(cache_error)}")
+        
         self.update_state(state='SUCCESS', meta={'status': 'Processing completed', 'progress': 100, 'result': final_result})
         
         return final_result

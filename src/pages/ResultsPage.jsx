@@ -3,12 +3,11 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { 
   CheckCircle, 
   FileText, 
-  FileSpreadsheet, 
-  FileJson,
   BarChart3,
   Calculator,
   Table,
-  Loader2
+  Loader2,
+  FileCode
 } from "lucide-react";
 import { 
   BalanceTrendChart, 
@@ -25,7 +24,7 @@ import {
   AccountingRatiosTable
 } from "../components/Charts";
 import { calculateFinancialRatios } from "../utils/financialRatios";
-import { exportToPDF } from "../utils/pdfExport";
+// Removed PDF export import - now using Tally XML export only
 import ReportsViewer from "../components/ReportsViewer";
 import { getDocumentTypeConfig, getExpectedReports } from "../config/documentTypes";
 
@@ -301,13 +300,8 @@ const ResultsPage = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result, documentType]); // Only depend on result and documentType to prevent infinite loops
-  const [isExportingPDF, setIsExportingPDF] = useState(false);
+  const [isExportingTally, setIsExportingTally] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
-  const [isExportingTabPDF, setIsExportingTabPDF] = useState({
-    charts: false,
-    ratios: false,
-    transactions: false
-  });
 
   // Debug: Log the result to see what we're getting
   React.useEffect(() => {
@@ -1035,83 +1029,190 @@ const ResultsPage = () => {
   
   const displayTransactions = allTransactions.slice(0, 20); // For table display
 
-  // Handle PDF export (full page)
-  const handleExportPDF = async () => {
-    setIsExportingPDF(true);
-    setExportProgress("Preparing PDF export...");
+  // Generate human-readable report file content
+  const generateHumanReadableReport = (data, docType, companyName) => {
+    const date = new Date().toLocaleString('en-IN', { dateStyle: 'long', timeStyle: 'short' });
+    let report = '';
+    
+    // Header
+    report += '='.repeat(80) + '\n';
+    report += '  TALLY EXPORT REPORT - HUMAN READABLE FORMAT\n';
+    report += '='.repeat(80) + '\n\n';
+    report += `Company Name: ${companyName}\n`;
+    report += `Document Type: ${docType.toUpperCase().replace('_', ' ')}\n`;
+    report += `Export Date: ${date}\n`;
+    report += '\n' + '-'.repeat(80) + '\n\n';
+    
+    if (docType === 'bank_statement') {
+      const transactions = data?.transactions || [];
+      
+      // Summary Section
+      report += 'SUMMARY\n';
+      report += '-'.repeat(80) + '\n';
+      report += `Total Transactions: ${transactions.length}\n`;
+      if (data.account_holder) report += `Account Holder: ${data.account_holder}\n`;
+      if (data.account_number) report += `Account Number: ${data.account_number}\n`;
+      if (data.bank_name) report += `Bank Name: ${data.bank_name}\n`;
+      if (data.opening_balance !== undefined) report += `Opening Balance: ₹${parseFloat(data.opening_balance || 0).toLocaleString('en-IN')}\n`;
+      if (data.closing_balance !== undefined) report += `Closing Balance: ₹${parseFloat(data.closing_balance || 0).toLocaleString('en-IN')}\n`;
+      if (data.total_deposits) report += `Total Credits/Deposits: ₹${parseFloat(data.total_deposits).toLocaleString('en-IN')}\n`;
+      if (data.total_withdrawals) report += `Total Debits/Withdrawals: ₹${parseFloat(data.total_withdrawals).toLocaleString('en-IN')}\n`;
+      if (data.net_balance_change) report += `Net Balance Change: ₹${parseFloat(data.net_balance_change).toLocaleString('en-IN')}\n`;
+      report += '\n' + '='.repeat(80) + '\n\n';
+      
+      // Transactions Section
+      report += 'TRANSACTION DETAILS\n';
+      report += '='.repeat(80) + '\n';
+      report += 'The following transactions will be imported into Tally:\n\n';
+      report += '-'.repeat(80) + '\n';
+      report += String('S.No.').padEnd(6) + String('Date').padEnd(12) + String('Type').padEnd(12) + String('Description').padEnd(30) + String('Amount').padStart(15) + '\n';
+      report += '-'.repeat(80) + '\n';
+      
+      transactions.forEach((txn, idx) => {
+        const sno = (idx + 1).toString().padEnd(6);
+        const date = (txn.date || 'N/A').padEnd(12);
+        const type = (txn.type === 'credit' ? 'RECEIPT' : 'PAYMENT').padEnd(12);
+        const desc = (txn.description || 'N/A').substring(0, 28).padEnd(30);
+        const amount = parseFloat(txn.amount || txn.credit || txn.debit || 0);
+        const amountStr = `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.padStart(15);
+        report += `${sno}${date}${type}${desc}${amountStr}\n`;
+      });
+      
+      report += '-'.repeat(80) + '\n';
+      report += `\nTotal: ${transactions.length} transactions\n`;
+      
+    } else if (docType === 'invoice') {
+      report += 'INVOICE DETAILS\n';
+      report += '-'.repeat(80) + '\n';
+      report += `Invoice Number: ${data.invoice_number || 'N/A'}\n`;
+      report += `Invoice Date: ${data.invoice_date || data.date || 'N/A'}\n`;
+      report += `Buyer Name: ${data.buyer?.name || 'N/A'}\n`;
+      if (data.buyer?.address) report += `Buyer Address: ${data.buyer.address}\n`;
+      if (data.seller?.name) report += `Seller Name: ${data.seller.name}\n`;
+      report += `Total Amount: ₹${parseFloat(data.total_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+      
+      const items = data.items || [];
+      if (items.length > 0) {
+        report += '\n' + '-'.repeat(80) + '\n';
+        report += 'ITEMS DETAILS\n';
+        report += '-'.repeat(80) + '\n';
+        report += String('S.No.').padEnd(6) + String('Description').padEnd(40) + String('Qty').padStart(8) + String('Rate').padStart(15) + String('Amount').padStart(15) + '\n';
+        report += '-'.repeat(80) + '\n';
+        
+        items.forEach((item, idx) => {
+          const sno = (idx + 1).toString().padEnd(6);
+          const desc = (item.name || item.description || 'N/A').substring(0, 38).padEnd(40);
+          const qty = parseFloat(item.quantity || 1).toFixed(2).padStart(8);
+          const rate = parseFloat(item.rate || item.price || 0);
+          const rateStr = `₹${rate.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.padStart(15);
+          const amount = parseFloat(item.amount || (item.quantity || 1) * rate);
+          const amountStr = `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.padStart(15);
+          report += `${sno}${desc}${qty}${rateStr}${amountStr}\n`;
+        });
+      }
+      
+    } else if (docType === 'trial_balance') {
+      const balances = data?.balances || [];
+      
+      report += 'TRIAL BALANCE SUMMARY\n';
+      report += '-'.repeat(80) + '\n';
+      report += `Total Accounts: ${balances.length}\n`;
+      
+      const totalDebits = balances.reduce((sum, b) => sum + (parseFloat(b.debit) || 0), 0);
+      const totalCredits = balances.reduce((sum, b) => sum + (parseFloat(b.credit) || 0), 0);
+      report += `Total Debits: ₹${totalDebits.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+      report += `Total Credits: ₹${totalCredits.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+      
+      report += '\n' + '='.repeat(80) + '\n\n';
+      report += 'ACCOUNT DETAILS\n';
+      report += '='.repeat(80) + '\n';
+      report += String('S.No.').padEnd(6) + String('Account Name').padEnd(40) + String('Debit').padStart(20) + String('Credit').padStart(20) + '\n';
+      report += '-'.repeat(80) + '\n';
+      
+      balances.forEach((bal, idx) => {
+        const sno = (idx + 1).toString().padEnd(6);
+        const accName = (bal.account_name || 'N/A').substring(0, 38).padEnd(40);
+        const debit = parseFloat(bal.debit || 0);
+        const credit = parseFloat(bal.credit || 0);
+        const debitStr = debit > 0 ? `₹${debit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-';
+        const creditStr = credit > 0 ? `₹${credit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '-';
+        report += `${sno}${accName}${debitStr.padStart(20)}${creditStr.padStart(20)}\n`;
+      });
+      
+      report += '\nNote: Opening balance journal vouchers will be created for import into Tally.\n';
+    }
+    
+    // Footer
+    report += '\n' + '='.repeat(80) + '\n';
+    report += 'NOTE:\n';
+    report += 'This is a human-readable report of the financial data.\n';
+    report += 'For Tally XML export, please contact support.\n';
+    report += '='.repeat(80) + '\n';
+    report += `\nGenerated by FinSight on ${date}\n`;
+    
+    return report;
+  };
+
+  // Handle Tally XML export
+  const handleExportTallyXML = async () => {
+    // Check if document type is supported for Tally export
+    const supportedTypes = ['bank_statement', 'invoice', 'trial_balance'];
+    if (!supportedTypes.includes(documentType)) {
+      alert(`Tally XML export is currently supported for: ${supportedTypes.join(', ')}. Your document type "${documentType}" is not yet supported.`);
+      return;
+    }
+
+    setIsExportingTally(true);
+    setExportProgress("Generating Tally report...");
     
     try {
-      await exportToPDF(fileName, (progress) => {
-        setExportProgress(progress);
-      });
-      setExportProgress("PDF exported successfully!");
+      // Get company name from result if available, otherwise use default
+      const companyName = result?.entity_name || result?.company_name || "FinSight Company";
+      
+      // Generate and download human-readable report file directly (no XML needed)
+      const readableReport = generateHumanReadableReport(result, documentType, companyName, 'N/A');
+      const readableBlob = new Blob([readableReport], { type: 'text/plain; charset=utf-8' });
+      const readableUrl = URL.createObjectURL(readableBlob);
+      const readableFilename = `tally_export_${documentType}_${new Date().toISOString().split('T')[0]}_report.txt`;
+      const readableLink = document.createElement('a');
+      readableLink.href = readableUrl;
+      readableLink.download = readableFilename;
+      readableLink.style.display = 'none';
+      document.body.appendChild(readableLink);
+      readableLink.click();
+      
+      setTimeout(() => {
+        document.body.removeChild(readableLink);
+        URL.revokeObjectURL(readableUrl);
+      }, 200);
+      
+      setExportProgress("Tally report exported successfully!");
       setTimeout(() => {
         setExportProgress("");
-        setIsExportingPDF(false);
+        setIsExportingTally(false);
       }, 2000);
     } catch (error) {
-      console.error("Error exporting PDF:", error);
-      setExportProgress("Failed to export PDF. Please try again.");
+      console.error("Error exporting to Tally XML:", error);
+      // Extract error message properly
+      let errorMessage = "Unknown error occurred";
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object') {
+        errorMessage = error.message || error.detail || error.error || JSON.stringify(error);
+      }
+      
+      setExportProgress(`Failed to export: ${errorMessage}`);
+      alert(`Failed to export to Tally XML: ${errorMessage}`);
       setTimeout(() => {
         setExportProgress("");
-        setIsExportingPDF(false);
+        setIsExportingTally(false);
       }, 3000);
     }
   };
 
-  // Handle PDF export for specific tab
-  const handleExportTabPDF = async (tabName) => {
-    setIsExportingTabPDF(prev => ({ ...prev, [tabName]: true }));
-    
-    try {
-      // Switch to the tab if not already active
-      if (activeTab !== tabName) {
-        setActiveTab(tabName);
-        // Wait for tab content to render
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-      
-      // Export with tab-specific filename
-      const tabFileName = `${fileName.replace(/\.[^/.]+$/, "")}_${tabName}`;
-      await exportToPDF(tabFileName, (progress) => {
-        // Progress handled by main export function
-      });
-      
-      setIsExportingTabPDF(prev => ({ ...prev, [tabName]: false }));
-    } catch (error) {
-      console.error(`Error exporting ${tabName} PDF:`, error);
-      alert(`Failed to export ${tabName} PDF. Please try again.`);
-      setIsExportingTabPDF(prev => ({ ...prev, [tabName]: false }));
-    }
-  };
-
-  // Handle Excel export (placeholder)
-  const handleExportExcel = () => {
-    alert("Excel export feature coming soon!");
-  };
-
-  // Handle JSON export
-  const handleExportJSON = () => {
-    const exportData = {
-      fileName,
-      summary,
-      transactions: parsedRows.length > 0 ? parsedRows : allTransactions,
-      anomalies,
-      financialRatios,
-      exportedAt: new Date().toISOString()
-    };
-    
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${fileName.replace(/\.[^/.]+$/, "")}_export_${new Date().getTime()}.json`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
+  // Removed PDF export functionality - now using Tally XML export only
 
   // Debug: Show raw data if available
   const showDebugInfo = result && Object.keys(result).length > 0;
@@ -1145,39 +1246,25 @@ const ResultsPage = () => {
           </div>
         </div>
 
-        {/* RIGHT: Download Buttons */}
+        {/* RIGHT: Tally XML Export Button */}
         <div className="flex flex-col items-end space-y-2 w-full sm:w-auto">
-          <div className="flex flex-wrap gap-2 sm:gap-3">
             <button 
-              onClick={handleExportPDF}
-              disabled={isExportingPDF}
-              className="group flex items-center px-4 py-2.5 rounded-xl bg-gradient-to-r from-red-50 to-red-100 text-red-600 hover:from-red-100 hover:to-red-200 border-2 border-red-200 hover:border-red-300 shadow-[0_2px_8px_rgba(239,68,68,0.15)] hover:shadow-[0_4px_12px_rgba(239,68,68,0.25)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-[0.98]"
-            >
-              {isExportingPDF ? (
-                <>
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Exporting...
+            onClick={handleExportTallyXML}
+            disabled={isExportingTally}
+            className="group flex items-center px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-700 hover:to-indigo-700 border-2 border-blue-500 hover:border-blue-600 shadow-[0_4px_12px_rgba(59,130,246,0.35)] hover:shadow-[0_6px_16px_rgba(59,130,246,0.45)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-[0.98] font-semibold"
+          >
+            {isExportingTally ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" /> Exporting to Tally...
                 </>
               ) : (
                 <>
-                  <FileText className="w-4 h-4 mr-2 group-hover:scale-110 transition-transform" /> PDF
+                <FileCode className="w-5 h-5 mr-2 group-hover:scale-110 transition-transform" /> Export Tally Report
                 </>
               )}
             </button>
-            <button 
-              onClick={handleExportExcel}
-              className="group flex items-center px-4 py-2.5 rounded-xl bg-gradient-to-r from-green-50 to-green-100 text-green-600 hover:from-green-100 hover:to-green-200 border-2 border-green-200 hover:border-green-300 shadow-[0_2px_8px_rgba(16,185,129,0.15)] hover:shadow-[0_4px_12px_rgba(16,185,129,0.25)] transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98]"
-            >
-              <FileSpreadsheet className="w-4 h-4 mr-2 group-hover:scale-110 transition-transform" /> Excel
-            </button>
-            <button 
-              onClick={handleExportJSON}
-              className="group flex items-center px-4 py-2.5 rounded-xl bg-gradient-to-r from-orange-50 to-orange-100 text-orange-600 hover:from-orange-100 hover:to-orange-200 border-2 border-orange-200 hover:border-orange-300 shadow-[0_2px_8px_rgba(249,115,22,0.15)] hover:shadow-[0_4px_12px_rgba(249,115,22,0.25)] transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98]"
-            >
-              <FileJson className="w-4 h-4 mr-2 group-hover:scale-110 transition-transform" /> JSON
-            </button>
-          </div>
           {exportProgress && (
-            <p className="text-xs text-[#64748B] mt-1 font-medium">{exportProgress}</p>
+            <p className="text-xs text-[#64748B] mt-1 font-medium text-right">{exportProgress}</p>
           )}
         </div>
       </header>
@@ -2070,25 +2157,6 @@ const ResultsPage = () => {
           )}
           {activeTab === "charts" && docConfig.showCharts && (
             <div className="space-y-6">
-              {/* Export Button for Charts Tab */}
-              <div className="flex justify-end mb-4">
-                <button
-                  onClick={() => handleExportTabPDF("charts")}
-                  disabled={isExportingTabPDF.charts}
-                  className="flex items-center px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                >
-                  {isExportingTabPDF.charts ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Exporting PDF...
-                    </>
-                  ) : (
-                    <>
-                      <FileText className="w-4 h-4 mr-2" /> Export Charts as PDF
-                    </>
-                  )}
-                </button>
-              </div>
-              
               {/* Show charts based on document type */}
               {documentType === "trial_balance" ? (
                 // Advanced Trial Balance Dashboard with dynamic visualizations
@@ -2176,25 +2244,6 @@ const ResultsPage = () => {
 
           {activeTab === "ratios" && docConfig.showRatios && (
             <div>
-              {/* Export Button for Financial Ratios Tab */}
-              <div className="flex justify-end mb-4">
-                <button
-                  onClick={() => handleExportTabPDF("ratios")}
-                  disabled={isExportingTabPDF.ratios}
-                  className="flex items-center px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                >
-                  {isExportingTabPDF.ratios ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Exporting PDF...
-                    </>
-                  ) : (
-                    <>
-                      <FileText className="w-4 h-4 mr-2" /> Export Financial Ratios as PDF
-                    </>
-                  )}
-                </button>
-              </div>
-              
               {/* Use AccountingRatiosTable (PDF format) to match Reports tab - same format and data */}
               {(() => {
                 // Use the same logic as ReportsViewer for accounting_ratios
@@ -2365,25 +2414,6 @@ const ResultsPage = () => {
 
           {activeTab === "transactions" && docConfig.showTransactions && (
             <div className="space-y-6">
-              {/* Export Button for Transactions Tab */}
-              <div className="flex justify-end mb-4">
-                <button
-                  onClick={() => handleExportTabPDF("transactions")}
-                  disabled={isExportingTabPDF.transactions}
-                  className="flex items-center px-4 py-2 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
-                >
-                  {isExportingTabPDF.transactions ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Exporting PDF...
-                    </>
-                  ) : (
-                    <>
-                      <FileText className="w-4 h-4 mr-2" /> Export Transactions as PDF
-                    </>
-                  )}
-                </button>
-              </div>
-              
               {/* Summary Section */}
               <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-lg border border-blue-100">
                 <h3 className="font-bold text-gray-800 mb-3 text-lg">Summary</h3>
@@ -2547,4 +2577,5 @@ const ResultsPage = () => {
 };
 
 export default ResultsPage;
+
 

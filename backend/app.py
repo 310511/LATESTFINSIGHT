@@ -6,7 +6,7 @@ from pdf2image import convert_from_path
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import re
 import vertexai
 from vertexai.generative_models import GenerativeModel
@@ -21,6 +21,7 @@ import asyncio
 import base64
 import hashlib
 import redis
+from datetime import datetime
 
 # Initialize Redis client for caching
 redis_client = None
@@ -72,6 +73,14 @@ from report_generators import (
     generate_gst_reports_from_excel
 )
 
+# Import Tally integration
+try:
+    from tally_integration import export_to_tally_xml, TallyXMLGenerator
+    TALLY_AVAILABLE = True
+except ImportError:
+    TALLY_AVAILABLE = False
+    print("WARNING: Tally integration not available. Install required dependencies if needed.")
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -113,6 +122,7 @@ if vertexai_project and vertexai_project != "your-gcp-project-id":
     except Exception as e:
         print(f"WARNING: Vertex AI initialization failed: {str(e)}")
         print("Falling back to Gemini API if available...")
+        vertexai_client = None
         if gemini_api_key:
             gemini_api_key_available = True
             print("✓ Using Gemini API as fallback")
@@ -121,6 +131,11 @@ elif gemini_api_key:
     gemini_api_key_available = True
     print("WARNING: Using Gemini API directly instead of Vertex AI. For production, use Vertex AI.")
     print("Set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file for Vertex AI.")
+
+# Ensure Gemini API is available as fallback even if Vertex AI is initialized
+if gemini_api_key and not gemini_api_key_available:
+    gemini_api_key_available = True
+    print(f"✓ Gemini API key available for fallback use")
 else:
     print("WARNING: Neither Vertex AI nor Gemini API key configured. Document processing will fail.")
     print("Please set VERTEXAI_PROJECT_ID or GEMINI_API_KEY in .env file.")
@@ -269,34 +284,207 @@ def generate_content_with_vertexai(prompt: str, require_json: bool = False, max_
             return content
         except Exception as e:
             error_str = str(e)
+            # Handle authentication errors - fallback to Gemini API if available
+            if "401" in error_str or "403" in error_str or "permission" in error_str.lower() or "authentication" in error_str.lower():
+                print(f"⚠️ Vertex AI authentication failed: {error_str}")
+                if gemini_api_key_available:
+                    print(f"🔄 Falling back to Gemini API...")
+                    # Fallback to Gemini API
+                    try:
+                        import google.generativeai as genai
+                        genai.configure(api_key=gemini_api_key)
+                        
+                        # Add JSON instruction if required
+                        if require_json:
+                            fallback_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. Do not include markdown formatting, code blocks, or any explanations."
+                        else:
+                            fallback_prompt = prompt
+                        
+                        # Use gemini-2.5-flash as primary (best free model)
+                        model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+                        
+                        for model_name in model_names:
+                            try:
+                                model = genai.GenerativeModel(model_name)
+                                response = model.generate_content(fallback_prompt)
+                                
+                                if not response or not response.text:
+                                    continue
+                                
+                                content = response.text.strip()
+                                
+                                # Clean up JSON if needed
+                                if require_json:
+                                    if content.startswith("```json"):
+                                        content = content.replace("```json", "").replace("```", "").strip()
+                                    elif content.startswith("```"):
+                                        content = content.replace("```", "").strip()
+                                
+                                # Cache the response if Redis is available
+                                if use_cache and REDIS_AVAILABLE and redis_client:
+                                    try:
+                                        cache_key = get_cache_key(prompt, require_json)
+                                        redis_client.setex(cache_key, 86400, content)
+                                        print(f"✓ Cached Gemini API fallback response (key: {cache_key[:20]}..., TTL: 24h)")
+                                    except Exception as cache_err:
+                                        print(f"Cache write error (response still returned): {str(cache_err)}")
+                                
+                                print(f"✓ Successfully used Gemini API fallback (model: {model_name})")
+                                return content
+                            except Exception as gemini_error:
+                                error_str_gemini = str(gemini_error)
+                                if "404" in error_str_gemini and "not found" in error_str_gemini.lower():
+                                    print(f"Model {model_name} not available, trying next model...")
+                                    continue
+                                # If last model failed, continue to raise error
+                                if model_name == model_names[-1]:
+                                    raise
+                        
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Failed to generate content with Gemini API fallback after trying all models."
+                        )
+                    except HTTPException:
+                        raise
+                    except Exception as fallback_error:
+                        print(f"⚠️ Gemini API fallback also failed: {str(fallback_error)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Vertex AI authentication failed and Gemini API fallback also failed: {str(fallback_error)}"
+                        )
+                else:
+                    # No Gemini API fallback available
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Vertex AI authentication failed. Please check your GCP credentials and project configuration, or set GEMINI_API_KEY as a fallback."
+                    )
             # Handle rate limiting
-            if "429" in error_str or "rate_limit" in error_str.lower() or "quota" in error_str.lower():
+            elif "429" in error_str or "rate_limit" in error_str.lower() or "quota" in error_str.lower():
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Exponential backoff
                     print(f"Rate limit hit, waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise HTTPException(
-                        status_code=429,
-                        detail="Vertex AI API rate limit exceeded. Please wait a few seconds and try again."
-                    )
-            # Handle authentication errors
-            elif "401" in error_str or "403" in error_str or "permission" in error_str.lower() or "authentication" in error_str.lower():
-                raise HTTPException(
-                    status_code=401,
-                    detail="Vertex AI authentication failed. Please check your GCP credentials and project configuration."
-                )
+                    # If rate limited and Gemini API available, try fallback
+                    if gemini_api_key_available:
+                        print(f"🔄 Vertex AI rate limited, falling back to Gemini API...")
+                        try:
+                            import google.generativeai as genai
+                            genai.configure(api_key=gemini_api_key)
+                            
+                            if require_json:
+                                fallback_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. Do not include markdown formatting, code blocks, or any explanations."
+                            else:
+                                fallback_prompt = prompt
+                            
+                            model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+                            for model_name in model_names:
+                                try:
+                                    model = genai.GenerativeModel(model_name)
+                                    response = model.generate_content(fallback_prompt)
+                                    if response and response.text:
+                                        content = response.text.strip()
+                                        if require_json:
+                                            if content.startswith("```json"):
+                                                content = content.replace("```json", "").replace("```", "").strip()
+                                            elif content.startswith("```"):
+                                                content = content.replace("```", "").strip()
+                                        print(f"✓ Successfully used Gemini API fallback due to rate limit (model: {model_name})")
+                                        return content
+                                except:
+                                    if model_name == model_names[-1]:
+                                        raise
+                            raise
+                        except:
+                            raise HTTPException(
+                                status_code=429,
+                                detail="Vertex AI API rate limit exceeded and Gemini API fallback failed. Please wait a few seconds and try again."
+                            )
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="Vertex AI API rate limit exceeded. Please wait a few seconds and try again."
+                        )
             else:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 1
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Error generating content with Vertex AI: {str(e)}"
-                    )
+                    # On final failure, try Gemini API fallback if available
+                    if gemini_api_key_available:
+                        print(f"🔄 Vertex AI failed after retries, falling back to Gemini API...")
+                        try:
+                            import google.generativeai as genai
+                            genai.configure(api_key=gemini_api_key)
+                            
+                            if require_json:
+                                fallback_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. Do not include markdown formatting, code blocks, or any explanations."
+                            else:
+                                fallback_prompt = prompt
+                            
+                            model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+                            for model_name in model_names:
+                                try:
+                                    model = genai.GenerativeModel(model_name)
+                                    response = model.generate_content(fallback_prompt)
+                                    if response and response.text:
+                                        content = response.text.strip()
+                                        if require_json:
+                                            if content.startswith("```json"):
+                                                content = content.replace("```json", "").replace("```", "").strip()
+                                            elif content.startswith("```"):
+                                                content = content.replace("```", "").strip()
+                                        print(f"✓ Successfully used Gemini API fallback (model: {model_name})")
+                                        return content
+                                except:
+                                    if model_name == model_names[-1]:
+                                        raise
+                            raise
+                        except Exception as fallback_error:
+                            raise HTTPException(
+                                status_code=500,
+                                detail=f"Error generating content with Vertex AI: {str(e)}. Gemini API fallback also failed: {str(fallback_error)}"
+                            )
+                    else:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error generating content with Vertex AI: {str(e)}"
+                        )
+    
+    # If all Vertex AI retries failed, try Gemini API fallback
+    if gemini_api_key_available:
+        print(f"🔄 Vertex AI failed after all retries, falling back to Gemini API...")
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_api_key)
+            
+            if require_json:
+                fallback_prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. Do not include markdown formatting, code blocks, or any explanations."
+            else:
+                fallback_prompt = prompt
+            
+            model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(fallback_prompt)
+                    if response and response.text:
+                        content = response.text.strip()
+                        if require_json:
+                            if content.startswith("```json"):
+                                content = content.replace("```json", "").replace("```", "").strip()
+                            elif content.startswith("```"):
+                                content = content.replace("```", "").strip()
+                        print(f"✓ Successfully used Gemini API fallback after Vertex AI retries (model: {model_name})")
+                        return content
+                except:
+                    if model_name == model_names[-1]:
+                        raise
+            raise
+        except Exception as fallback_error:
+            raise HTTPException(status_code=500, detail=f"Failed to get response from Vertex AI after retries. Gemini API fallback also failed: {str(fallback_error)}")
     
     raise HTTPException(status_code=500, detail="Failed to get response from Vertex AI after retries")
 
@@ -1062,7 +1250,25 @@ OCR Text:
     
     try:
         response_text = generate_content_with_vertexai(prompt, require_json=True)
-        result = json.loads(response_text)
+        
+        # Check if response is empty or None
+        if not response_text or not response_text.strip():
+            raise ValueError("Vertex AI returned empty response")
+        
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError as json_error:
+            # Try to extract JSON from markdown code blocks
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group())
+                except:
+                    raise ValueError(f"Failed to parse JSON response. Error: {str(json_error)}. Response preview: {response_text[:500]}")
+            else:
+                raise ValueError(f"Failed to parse JSON response. Error: {str(json_error)}. Response preview: {response_text[:500]}")
+        
         # Clean numbers
         for key in ["opening_balance", "closing_balance", "total_deposits", "total_withdrawals", "net_balance_change", "average_monthly_balance"]:
             if key in result:
@@ -1143,8 +1349,16 @@ OCR Text:
         }
         
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error extracting bank statement: {str(e)}")
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = str(e) if str(e) else repr(e)
+        print(f"ERROR in extract_bank_statement_structured: {error_msg}")
+        print(f"Traceback: {error_trace}")
+        sys.stdout.flush()  # Ensure error is printed immediately
+        raise HTTPException(status_code=500, detail=f"Error extracting bank statement: {error_msg}")
 
 def extract_gst_return(text):
     """Extract GST Return data with person-relevant details"""
@@ -2175,7 +2389,15 @@ async def process_audit_files(
     files: List[UploadFile] = File(...),
     document_type: Optional[str] = Form("audit")
 ):
-    """Process multiple PDF files for comprehensive audit report generation"""
+    """Process multiple PDF files for comprehensive audit report generation
+    
+    File validation:
+    - Max file size per file: 50MB
+    - Allowed file types: PDF, DOCX, DOC, XLSX, XLS, JPG, JPEG, PNG
+    """
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.xlsx', '.xls', '.jpg', '.jpeg', '.png'}
+    
     print(f"\n{'='*60}")
     print(f"POST /process-audit - Processing {len(files) if files else 0} files for audit report")
     print(f"{'='*60}\n")
@@ -2194,14 +2416,42 @@ async def process_audit_files(
         for file in files:
             if not file.filename:
                 continue
+            
+            # Validate file extension
+            file_extension = os.path.splitext(file.filename)[1].lower()
+            if file_extension not in ALLOWED_EXTENSIONS:
+                allowed_types_str = ', '.join(sorted([ext.upper() for ext in ALLOWED_EXTENSIONS]))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File '{file.filename}' has unsupported type '{file_extension}'. Allowed types: {allowed_types_str}"
+                )
                 
             print(f"Processing file: {file.filename}")
             # Sanitize filename for filesystem
             safe_filename = file.filename.replace("/", "_").replace("\\", "_")
             temp_file_path = os.path.join(temp_dir, f"finsight_audit_{os.getpid()}_{safe_filename}")
             
-            # Save file
-            content = await file.read()
+            # Read and validate file size
+            content = b""
+            total_size = 0
+            chunk_size = 1024 * 1024  # 1MB chunks
+            
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File '{file.filename}' size ({total_size / (1024*1024):.2f}MB) exceeds maximum allowed size of 50MB."
+                    )
+                content += chunk
+            
+            if total_size == 0:
+                raise HTTPException(status_code=400, detail=f"File '{file.filename}' is empty.")
+            
+            print(f"✓ File validated: {file.filename} ({total_size / (1024*1024):.2f}MB)")
             print(f"Read {len(content)} bytes from {file.filename}")
             with open(temp_file_path, "wb") as temp:
                 temp.write(content)
@@ -2317,7 +2567,15 @@ async def process_gst_files(
     files: List[UploadFile] = File(...),
     document_type: Optional[str] = Form("gst_return")
 ):
-    """Process multiple Excel files for GST report generation (GSTR-2B, Purchase Register, Vendor Master)"""
+    """Process multiple Excel files for GST report generation (GSTR-2B, Purchase Register, Vendor Master)
+    
+    File validation:
+    - Max file size per file: 50MB
+    - Only Excel files allowed: .xlsx, .xls
+    """
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    ALLOWED_EXTENSIONS = {'.xlsx', '.xls'}
+    
     print(f"\n{'='*60}")
     print(f"POST /process-gst - Processing {len(files) if files else 0} Excel files for GST reports")
     print(f"{'='*60}\n")
@@ -2337,17 +2595,39 @@ async def process_gst_files(
             if not file.filename:
                 continue
             
-            # Only accept Excel files
-            if not (file.filename.lower().endswith(('.xlsx', '.xls'))):
-                print(f"Warning: Skipping non-Excel file: {file.filename}")
-                continue
+            # Validate file extension (only Excel files)
+            file_extension = os.path.splitext(file.filename)[1].lower()
+            if file_extension not in ALLOWED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File '{file.filename}' is not an Excel file. Only .xlsx and .xls files are allowed for GST processing."
+                )
             
             print(f"Processing Excel file: {file.filename}")
             safe_filename = file.filename.replace("/", "_").replace("\\", "_")
             temp_file_path = os.path.join(temp_dir, f"finsight_gst_{os.getpid()}_{safe_filename}")
             
-            # Save file
-            content = await file.read()
+            # Read and validate file size
+            content = b""
+            total_size = 0
+            chunk_size = 1024 * 1024  # 1MB chunks
+            
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File '{file.filename}' size ({total_size / (1024*1024):.2f}MB) exceeds maximum allowed size of 50MB."
+                    )
+                content += chunk
+            
+            if total_size == 0:
+                raise HTTPException(status_code=400, detail=f"File '{file.filename}' is empty.")
+            
+            print(f"✓ File validated: {file.filename} ({total_size / (1024*1024):.2f}MB)")
             print(f"Read {len(content)} bytes from {file.filename}")
             with open(temp_file_path, "wb") as temp:
                 temp.write(content)
@@ -2434,18 +2714,79 @@ async def process_file(
     """
     Process document synchronously and return results immediately.
     Uses Redis cache to return cached results instantly for identical documents.
+    
+    File validation:
+    - Max file size: 50MB
+    - Allowed file types: PDF, DOCX, DOC, XLSX, XLS, JPG, JPEG, PNG
     """
+    # File validation constants
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB in bytes
+    ALLOWED_EXTENSIONS = {
+        '.pdf', '.docx', '.doc', 
+        '.xlsx', '.xls', 
+        '.jpg', '.jpeg', '.png'
+    }
+    
+    # Validate filename
+    filename = file.filename
+    if not filename:
+        raise HTTPException(
+            status_code=400,
+            detail="No filename provided. Please ensure the file has a valid name."
+        )
+    
+    # Validate file extension
+    file_extension = os.path.splitext(filename)[1].lower()
+    if file_extension not in ALLOWED_EXTENSIONS:
+        allowed_types_str = ', '.join(sorted([ext.upper() for ext in ALLOWED_EXTENSIONS]))
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type '{file_extension}' is not supported. Allowed file types: {allowed_types_str}. Please upload a supported file format."
+        )
+    
     print(f"\n{'='*60}")
-    print(f"POST /process - Processing file: {file.filename}")
+    print(f"POST /process - Processing file: {filename}")
+    print(f"File extension: {file_extension}")
     print(f"Document type: {document_type}")
     print(f"{'='*60}\n")
     
     temp_file_path = None
     
     try:
-        # Read file content
-        content = await file.read()
-        filename = file.filename
+        # Read file content with size validation
+        content = b""
+        total_size = 0
+        chunk_size = 1024 * 1024  # Read in 1MB chunks
+        
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            total_size += len(chunk)
+            
+            # Check size during read to avoid loading huge files into memory
+            if total_size > MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File size ({total_size / (1024*1024):.2f}MB) exceeds maximum allowed size of 50MB. Please upload a smaller file."
+                )
+            
+            content += chunk
+        
+        # Final size validation
+        if total_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="File is empty. Please upload a file with content."
+            )
+        
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size ({total_size / (1024*1024):.2f}MB) exceeds maximum allowed size of 50MB. Please upload a smaller file."
+            )
+        
+        print(f"✓ File validation passed: {filename} ({total_size / (1024*1024):.2f}MB, {file_extension})")
         
         # Check cache for complete document processing result
         if REDIS_AVAILABLE and redis_client:
@@ -2769,28 +3110,33 @@ async def get_job_result(job_id: str):
                 detail=f"Job failed: {error_msg}"
             )
         elif task_state == 'SUCCESS':
-            # Safely get result
+            # Safely get result - try task.result first (most reliable)
+            result = None
             try:
-                task_info = task.info if task.info else {}
-                result = None
-                if isinstance(task_info, dict):
-                    result = task_info.get('result')
+                # Get result directly from task (this is the actual return value)
+                result = task.result
                 if result is None:
+                    # Fallback: try getting from task.info meta
                     try:
-                        result = task.result
+                        task_info = task.info if task.info else {}
+                        if isinstance(task_info, dict):
+                            result = task_info.get('result')
                     except Exception:
-                        result = None
+                        pass
             except Exception as result_error:
                 print(f"ERROR getting task result for {job_id}: {str(result_error)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error retrieving result: {str(result_error)}"
-                )
+                # Try fallback to meta
+                try:
+                    task_info = task.info if task.info else {}
+                    if isinstance(task_info, dict):
+                        result = task_info.get('result')
+                except Exception:
+                    pass
             
             if result is None:
                 raise HTTPException(
                     status_code=404,
-                    detail="Job completed but result is not available"
+                    detail="Job completed but result is not available. The task may have completed but result was not properly stored."
                 )
             
             return JSONResponse(content=result)
@@ -2842,6 +3188,188 @@ async def cache_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting cache stats: {str(e)}")
+
+@app.post("/export/tally")
+async def export_to_tally(request_data: Dict):
+    """
+    Export processed document data to Tally XML format
+    
+    Args:
+        request_data: JSON body containing:
+            - data: Processed document data (from /process endpoint)
+            - document_type: Type of document (bank_statement, invoice, etc.)
+            - company_name: Optional Tally company name (default: "FinSight Company")
+    
+    Returns:
+        XML file ready for import into Tally ERP/TallyPrime
+    """
+    if not TALLY_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Tally integration is not available. Please check installation."
+        )
+    
+    try:
+        # Extract parameters from request body
+        data = request_data.get("data")
+        document_type = request_data.get("document_type")
+        company_name = request_data.get("company_name")
+        
+        if not data:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: 'data' in request body"
+            )
+        
+        if not document_type:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: 'document_type' in request body"
+            )
+        
+        company = company_name or "FinSight Company"
+        xml_content = export_to_tally_xml(data, document_type, company)
+        
+        # Create a temporary file for the XML
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-8')
+        temp_file.write(xml_content)
+        temp_file.close()
+        
+        filename = f"tally_export_{document_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml"
+        return FileResponse(
+            temp_file.name,
+            media_type="application/xml",
+            filename=filename,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "application/xml; charset=utf-8"
+            }
+        )
+    except Exception as e:
+        import traceback
+        print(f"Error exporting to Tally: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating Tally XML: {str(e)}"
+        )
+
+
+@app.post("/process/export-tally")
+async def process_and_export_to_tally(
+    file: UploadFile = File(...),
+    document_type: Optional[str] = Form(None),
+    company_name: Optional[str] = Form(None)
+):
+    """
+    Process a document and export directly to Tally XML format
+    
+    This endpoint:
+    1. Processes the uploaded document
+    2. Converts the extracted data to Tally vouchers
+    3. Returns XML file ready for import into Tally
+    """
+    if not TALLY_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Tally integration is not available."
+        )
+    
+    # First, process the document using existing logic
+    # We'll reuse the /process endpoint logic
+    temp_file_path = None
+    
+    try:
+        # Read and validate file
+        content = await file.read()
+        filename = file.filename
+        
+        # Validate file size and type (reuse validation logic)
+        MAX_FILE_SIZE = 50 * 1024 * 1024
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds maximum allowed size of 50MB"
+            )
+        
+        # Save to temporary file
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_file_path = os.path.join(temp_dir, f"finsight_tally_{filename}")
+        
+        with open(temp_file_path, "wb") as temp:
+            temp.write(content)
+        
+        # Extract text (reuse existing logic)
+        text = ""
+        if filename.lower().endswith(".pdf"):
+            text = extract_text_from_pdf(temp_file_path)
+        elif filename.lower().endswith((".docx", ".doc")):
+            text = extract_text_from_docx(temp_file_path)
+        elif filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            text = extract_text_from_image(temp_file_path)
+        elif filename.lower().endswith((".xlsx", ".xls")):
+            excel_data = extract_excel_data(temp_file_path)
+            text = excel_data.get("summary_text", "")
+        else:
+            with open(temp_file_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        
+        # Normalize document type
+        if document_type:
+            document_type = document_type.lower().replace(" ", "_").replace("-", "_")
+        
+        # Extract data based on document type
+        result = {}
+        if document_type == "bank_statement":
+            result = extract_bank_statement_structured(text)
+        elif document_type == "invoice":
+            result = extract_invoice(text)
+        elif document_type == "trial_balance":
+            result = extract_trial_balance(text)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Document type '{document_type}' is not supported for Tally export. Supported types: bank_statement, invoice, trial_balance"
+            )
+        
+        # Export to Tally XML
+        company = company_name or "FinSight Company"
+        xml_content = export_to_tally_xml(result, document_type, company)
+        
+        # Create response file
+        temp_xml_file = tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-8')
+        temp_xml_file.write(xml_content)
+        temp_xml_file.close()
+        
+        return FileResponse(
+            temp_xml_file.name,
+            media_type="application/xml",
+            filename=f"tally_export_{document_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="tally_export_{document_type}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xml"'
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"Error in process_and_export_to_tally: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing and exporting to Tally: {str(e)}"
+        )
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except Exception:
+                pass
+
 
 @app.get("/cache/clear")
 async def clear_cache():
