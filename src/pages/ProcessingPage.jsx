@@ -167,6 +167,166 @@ const ProcessingPage = () => {
       // Debug: Log the response data
       console.log("ProcessingPage - Backend response:", JSON.stringify(data, null, 2));
       console.log("ProcessingPage - Response keys:", Object.keys(data));
+      console.log("ProcessingPage - Has job_id?", !!data.job_id);
+      console.log("ProcessingPage - Status:", data.status);
+      
+      // Check if this is a job queue response (async processing)
+      // Handle both direct response and wrapped response (FastAPI JSONResponse might wrap in 'content')
+      let responseData = data;
+      if (data.content) {
+        responseData = data.content; // FastAPI JSONResponse wraps content
+      }
+      
+      console.log("ProcessingPage - Checking for job_id. responseData:", responseData);
+      console.log("ProcessingPage - Has job_id?", !!responseData?.job_id);
+      console.log("ProcessingPage - Status value:", responseData?.status);
+      
+      // Check if this is a job queue response (async processing)
+      if (responseData?.job_id && (responseData.status === "queued" || responseData.status === "pending")) {
+        console.log("ProcessingPage - Job queued, starting polling for job_id:", responseData.job_id);
+        
+        // Stop the step animation interval temporarily while polling
+        clearInterval(progressInterval);
+        
+        // Poll job status until completion
+        const jobId = responseData.job_id;
+        let pollAttempts = 0;
+        const maxPollAttempts = 300; // 10 minutes at 2 seconds per poll
+        
+        const pollInterval = setInterval(async () => {
+          pollAttempts++;
+          
+          try {
+            console.log(`ProcessingPage - Polling attempt ${pollAttempts} for job ${jobId}`);
+            const statusResponse = await fetch(`${API_URL}/job/${jobId}/status`);
+            
+            if (!statusResponse.ok) {
+              // If 503, job queue might not be available
+              if (statusResponse.status === 503) {
+                clearInterval(pollInterval);
+                clearTimeout(timeoutId);
+                setStepInterval(null);
+                setError("Job queue is not available. Please ensure Redis and Celery worker are running.");
+                setProcessing(false);
+                return;
+              }
+              throw new Error(`Status check failed: ${statusResponse.status}`);
+            }
+            
+            const statusData = await statusResponse.json();
+            console.log("ProcessingPage - Job status response:", statusData);
+            
+            // Update progress based on job status
+            if (statusData.progress !== undefined) {
+              // Map progress (0-100) to steps (0-4)
+              const progressStep = Math.floor((statusData.progress / 100) * (steps.length - 1));
+              setCurrentStep(Math.min(progressStep, steps.length - 1));
+              console.log(`ProcessingPage - Progress: ${statusData.progress}%, Step: ${progressStep}`);
+            }
+            
+            if (statusData.status === "completed" || statusData.state === "SUCCESS") {
+              clearInterval(pollInterval);
+              clearTimeout(timeoutId);
+              setStepInterval(null);
+              
+              // Fetch the actual result
+              console.log("ProcessingPage - Job completed, fetching result...");
+              const resultResponse = await fetch(`${API_URL}/job/${jobId}/result`);
+              if (!resultResponse.ok) {
+                throw new Error(`Failed to fetch job result: ${resultResponse.status}`);
+              }
+              
+              const resultData = await resultResponse.json();
+              console.log("ProcessingPage - Job result received:", resultData);
+              console.log("ProcessingPage - Result keys:", Object.keys(resultData || {}));
+              
+              // Extract the actual data from the result
+              // Result format from task: { extracted_data: {...}, reports: {...}, document_type: "...", filename: "..." }
+              // Or might be directly the extracted_data if nested
+              let actualData = resultData;
+              let reports = {};
+              
+              if (resultData.extracted_data) {
+                actualData = resultData.extracted_data;
+                reports = resultData.reports || {};
+              } else if (resultData.result && resultData.result.extracted_data) {
+                // If result is nested in another result object
+                actualData = resultData.result.extracted_data;
+                reports = resultData.result.reports || {};
+              }
+              
+              console.log("ProcessingPage - Extracted data:", actualData);
+              console.log("ProcessingPage - Extracted reports:", reports);
+              
+              // Merge extracted data with reports
+              const finalResult = { ...actualData, reports };
+              
+              setResult(finalResult);
+              
+              // Complete all steps
+              setCurrentStep(steps.length);
+              
+              // Navigate to results with actual data after showing completion
+              setTimeout(() => {
+                navigate("/dashboard/results", { 
+                  state: { 
+                    fileName: fileName || resultData.filename, 
+                    result: finalResult, 
+                    documentType: documentType || resultData.document_type || "unknown"
+                  } 
+                });
+              }, 1500);
+            } else if (statusData.status === "failed" || statusData.state === "FAILURE") {
+              clearInterval(pollInterval);
+              clearTimeout(timeoutId);
+              setStepInterval(null);
+              const errorMsg = statusData.error || statusData.message || "Job processing failed";
+              console.error("ProcessingPage - Job failed:", errorMsg);
+              throw new Error(errorMsg);
+            } else if (statusData.status === "processing" || statusData.state === "PROCESSING") {
+              // Update progress message
+              if (statusData.message) {
+                console.log("ProcessingPage - Processing:", statusData.message);
+              }
+            } else if (statusData.status === "pending" || statusData.state === "PENDING") {
+              console.log("ProcessingPage - Job is pending, waiting...");
+            }
+            
+            // Check max attempts
+            if (pollAttempts >= maxPollAttempts) {
+              clearInterval(pollInterval);
+              clearTimeout(timeoutId);
+              setStepInterval(null);
+              setError("Job processing timeout: The job took too long to complete (10 minutes).");
+              setProcessing(false);
+            }
+          } catch (pollError) {
+            console.error("ProcessingPage - Error polling job status:", pollError);
+            clearInterval(pollInterval);
+            clearTimeout(timeoutId);
+            setStepInterval(null);
+            setError(`Error checking job status: ${pollError.message}`);
+            setProcessing(false);
+          }
+        }, 2000); // Poll every 2 seconds
+        
+        // Set a timeout for polling (max 10 minutes)
+        const pollTimeout = setTimeout(() => {
+          clearInterval(pollInterval);
+          clearTimeout(timeoutId);
+          setStepInterval(null);
+          setError("Job processing timeout: The job took too long to complete (10 minutes).");
+          setProcessing(false);
+        }, 600000); // 10 minutes
+        
+        // Store poll interval and timeout for cleanup
+        setStepInterval(pollInterval);
+        
+        return; // Exit early, polling will handle the rest
+      }
+      
+      // Legacy synchronous response handling (fallback)
+      console.log("ProcessingPage - Response keys:", Object.keys(data));
       console.log("ProcessingPage - Full data object:", data);
       
       // FastAPI JSONResponse might wrap the content, so check if data has the fields directly

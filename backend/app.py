@@ -18,6 +18,35 @@ import time
 import platform
 import pandas as pd
 import asyncio
+import base64
+import hashlib
+import redis
+
+# Initialize Redis client for caching
+redis_client = None
+REDIS_AVAILABLE = False
+try:
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_client = redis.from_url(redis_url, decode_responses=True)
+    redis_client.ping()  # Test connection
+    REDIS_AVAILABLE = True
+    print("✓ Redis connected for caching")
+except Exception as e:
+    print(f"WARNING: Redis not available for caching: {str(e)}")
+    print("Caching will be disabled. Install and start Redis for better performance.")
+    redis_client = None
+    REDIS_AVAILABLE = False
+
+# Import Celery app (lazy import to avoid issues if Redis is not available)
+try:
+    from celery_app import celery_app
+    CELERY_AVAILABLE = True
+except Exception as e:
+    print(f"WARNING: Celery not available: {str(e)}")
+    print("Async job queue will not work. Install Redis and start Celery worker.")
+    celery_app = None
+    CELERY_AVAILABLE = False
+
 try:
     from docx import Document
     DOCX_AVAILABLE = True
@@ -74,39 +103,136 @@ vertexai_model_name = os.getenv("VERTEXAI_MODEL", "gemini-1.5-pro")
 
 # Initialize Vertex AI client
 vertexai_client = None
-if vertexai_project:
+gemini_api_key_available = False
+
+if vertexai_project and vertexai_project != "your-gcp-project-id":
     try:
         vertexai.init(project=vertexai_project, location=vertexai_location)
         vertexai_client = GenerativeModel(vertexai_model_name)
         print(f"✓ Vertex AI initialized: project={vertexai_project}, location={vertexai_location}, model={vertexai_model_name}")
     except Exception as e:
         print(f"WARNING: Vertex AI initialization failed: {str(e)}")
-        print("Document processing will fail until Vertex AI is properly configured.")
+        print("Falling back to Gemini API if available...")
+        if gemini_api_key:
+            gemini_api_key_available = True
+            print("✓ Using Gemini API as fallback")
 elif gemini_api_key:
     # Fallback: Use Gemini API directly (not Vertex AI)
+    gemini_api_key_available = True
     print("WARNING: Using Gemini API directly instead of Vertex AI. For production, use Vertex AI.")
     print("Set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file for Vertex AI.")
 else:
     print("WARNING: Neither Vertex AI nor Gemini API key configured. Document processing will fail.")
     print("Please set VERTEXAI_PROJECT_ID or GEMINI_API_KEY in .env file.")
 
+# Helper function to generate cache key from prompt
+def get_cache_key(prompt: str, require_json: bool = False) -> str:
+    """Generate a cache key from prompt content"""
+    cache_string = f"{prompt}_{require_json}"
+    cache_hash = hashlib.md5(cache_string.encode()).hexdigest()
+    return f"gemini_cache:{cache_hash}"
+
+# Helper function to generate document cache key from file content
+def get_document_cache_key(file_content: bytes, document_type: Optional[str] = None) -> str:
+    """Generate a cache key from file content hash"""
+    file_hash = hashlib.sha256(file_content).hexdigest()
+    doc_type_str = document_type or "auto"
+    return f"document_cache:{file_hash}:{doc_type_str}"
+
 # Helper function to generate content using Vertex AI
-def generate_content_with_vertexai(prompt: str, require_json: bool = False, max_retries: int = 3):
+def generate_content_with_vertexai(prompt: str, require_json: bool = False, max_retries: int = 3, use_cache: bool = True):
     """
-    Generate content using Vertex AI Gemini model.
+    Generate content using Vertex AI Gemini model with Redis caching.
     
     Args:
         prompt: The prompt to send to the model
         require_json: If True, expects JSON response and adds JSON instruction to prompt
         max_retries: Maximum number of retry attempts
+        use_cache: Whether to use Redis cache (default: True)
     
     Returns:
         str: The generated content
     """
-    if not vertexai_client:
+    # Check cache first if Redis is available
+    if use_cache and REDIS_AVAILABLE and redis_client:
+        try:
+            cache_key = get_cache_key(prompt, require_json)
+            cached_response = redis_client.get(cache_key)
+            if cached_response:
+                print(f"✓ Cache HIT for prompt (key: {cache_key[:20]}...)")
+                return cached_response
+        except Exception as e:
+            print(f"Cache read error (continuing without cache): {str(e)}")
+    
+    # Use Gemini API as fallback if Vertex AI is not available
+    if not vertexai_client and not gemini_api_key_available:
         raise HTTPException(
             status_code=500,
-            detail="Vertex AI is not configured. Please set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file."
+            detail="Neither Vertex AI nor Gemini API is configured. Please set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file, or set GEMINI_API_KEY as a fallback."
+        )
+    
+    # If using Gemini API fallback
+    if not vertexai_client and gemini_api_key_available:
+        import google.generativeai as genai
+        genai.configure(api_key=gemini_api_key)
+        
+        # Add JSON instruction if required
+        if require_json:
+            prompt = f"{prompt}\n\nIMPORTANT: Return ONLY valid JSON. Do not include markdown formatting, code blocks, or any explanations."
+        
+        # Use gemini-2.5-flash as primary (best free model - latest, fast, free tier, high quality)
+        # Fallback to gemini-2.0-flash if 2.5 is unavailable
+        # These are the actual available models in the free Gemini API
+        model_names = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+        
+        for attempt in range(max_retries):
+            for model_name in model_names:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(prompt)
+                    
+                    if not response or not response.text:
+                        raise ValueError("Gemini API returned empty content")
+                    
+                    content = response.text.strip()
+                    
+                    # Clean up JSON if needed
+                    if require_json:
+                        # Remove markdown code blocks if present
+                        if content.startswith("```json"):
+                            content = content.replace("```json", "").replace("```", "").strip()
+                        elif content.startswith("```"):
+                            content = content.replace("```", "").strip()
+                    
+                    # Cache the response if Redis is available
+                    if use_cache and REDIS_AVAILABLE and redis_client:
+                        try:
+                            cache_key = get_cache_key(prompt, require_json)
+                            # Cache for 24 hours (86400 seconds)
+                            redis_client.setex(cache_key, 86400, content)
+                            print(f"✓ Cached Gemini API response (key: {cache_key[:20]}..., TTL: 24h)")
+                        except Exception as e:
+                            print(f"Cache write error (response still returned): {str(e)}")
+                    
+                    return content
+                except Exception as e:
+                    error_str = str(e)
+                    # If model not found, try next model name
+                    if "404" in error_str and "not found" in error_str.lower():
+                        print(f"Model {model_name} not available, trying next model...")
+                        continue
+                    # For other errors on last attempt, raise
+                    if attempt == max_retries - 1 and model_name == model_names[-1]:
+                        raise
+                    # Otherwise, wait and retry
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 1
+                        time.sleep(wait_time)
+                        break
+        
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate content with Gemini API after trying all available models."
         )
     
     # Add JSON instruction if required
@@ -129,6 +255,16 @@ def generate_content_with_vertexai(prompt: str, require_json: bool = False, max_
                     content = content.replace("```json", "").replace("```", "").strip()
                 elif content.startswith("```"):
                     content = content.replace("```", "").strip()
+            
+            # Cache the response if Redis is available
+            if use_cache and REDIS_AVAILABLE and redis_client:
+                try:
+                    cache_key = get_cache_key(prompt, require_json)
+                    # Cache for 24 hours (86400 seconds)
+                    redis_client.setex(cache_key, 86400, content)
+                    print(f"✓ Cached Vertex AI response (key: {cache_key[:20]}..., TTL: 24h)")
+                except Exception as e:
+                    print(f"Cache write error (response still returned): {str(e)}")
             
             return content
         except Exception as e:
@@ -1212,8 +1348,32 @@ OCR Text:
             result["reports"] = {"error": f"Could not generate reports: {str(e)}"}
         
         return result
+    except HTTPException:
+        # Re-raise HTTPExceptions as-is (they already have proper status codes and messages)
+        raise
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error parsing trial balance JSON response: {str(e)}. The AI model may have returned invalid JSON."
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error extracting trial balance: {str(e)}")
+        error_msg = str(e)
+        # Provide more helpful error messages
+        if "Vertex AI is not configured" in error_msg or "VERTEXAI_PROJECT_ID" in error_msg:
+            raise HTTPException(
+                status_code=500,
+                detail="Vertex AI is not configured. Please set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file, or set GEMINI_API_KEY as a fallback."
+            )
+        elif "rate_limit" in error_msg.lower() or "quota" in error_msg.lower() or "429" in error_msg:
+            raise HTTPException(
+                status_code=429,
+                detail="API rate limit exceeded. Please try again in a few moments."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error extracting trial balance: {error_msg}"
+            )
 
 def extract_profit_loss(text):
     """Extract Profit & Loss Statement data with person-relevant details"""
@@ -2271,149 +2431,129 @@ async def process_file(
     file: UploadFile = File(...),
     document_type: Optional[str] = Form(None)
 ):
-    """Process uploaded document and extract financial data based on document type"""
+    """
+    Process document synchronously and return results immediately.
+    Uses Redis cache to return cached results instantly for identical documents.
+    """
     print(f"\n{'='*60}")
     print(f"POST /process - Processing file: {file.filename}")
     print(f"Document type: {document_type}")
-    print(f"File size: {file.size if hasattr(file, 'size') else 'unknown'}")
     print(f"{'='*60}\n")
+    
     temp_file_path = None
     
     try:
-        # Store uploaded file temporarily in user's temp directory (avoids elevation issues)
+        # Read file content
+        content = await file.read()
+        filename = file.filename
+        
+        # Check cache for complete document processing result
+        if REDIS_AVAILABLE and redis_client:
+            try:
+                doc_cache_key = get_document_cache_key(content, document_type)
+                cached_result = redis_client.get(doc_cache_key)
+                if cached_result:
+                    print(f"✓ CACHE HIT: Returning cached result for document (key: {doc_cache_key[:30]}...)")
+                    print(f"  Document: {filename} | Type: {document_type or 'auto'}")
+                    return JSONResponse(content=json.loads(cached_result))
+                else:
+                    print(f"✓ CACHE MISS: Processing new document (key: {doc_cache_key[:30]}...)")
+            except Exception as e:
+                print(f"Cache check error (continuing with processing): {str(e)}")
+        
+        # Save to temporary file
         import tempfile
         temp_dir = tempfile.gettempdir()
-        temp_file_path = os.path.join(temp_dir, f"finsight_{os.getpid()}_{file.filename}")
-        print(f"Saving file to: {temp_file_path}")
-        content = await file.read()
-        print(f"File read: {len(content)} bytes")
+        temp_file_path = os.path.join(temp_dir, f"finsight_{filename}")
+        
         with open(temp_file_path, "wb") as temp:
             temp.write(content)
-        print(f"File saved successfully")
         
-        # Extract text using OCR
-        print("Starting text extraction...")
-        if file.filename.lower().endswith(".pdf"):
-            print("Extracting from PDF...")
+        print(f"File saved to: {temp_file_path}")
+        
+        # Extract text
+        print("Extracting text...")
+        text = ""
+        if filename.lower().endswith(".pdf"):
             text = extract_text_from_pdf(temp_file_path)
-        elif file.filename.lower().endswith((".docx", ".doc")):
-            print("Extracting from DOCX...")
+        elif filename.lower().endswith((".docx", ".doc")):
             text = extract_text_from_docx(temp_file_path)
-        elif file.filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            print("Extracting from image...")
+        elif filename.lower().endswith((".jpg", ".jpeg", ".png")):
             text = extract_text_from_image(temp_file_path)
+        elif filename.lower().endswith((".xlsx", ".xls")):
+            excel_data = extract_excel_data(temp_file_path)
+            text = excel_data.get("summary_text", "")
         else:
-            # Try to read as text file
-            print("Reading as text file...")
             with open(temp_file_path, "r", encoding="utf-8") as f:
                 text = f.read()
+        
         print(f"Text extracted: {len(text)} characters")
         
-        # Normalize document type from frontend
+        # Normalize document type
         if document_type:
             document_type = document_type.lower().replace(" ", "_").replace("-", "_")
         
-        # Step 1: Verify document type matches (if provided)
-        if document_type:
-            print(f"Classifying document type: {document_type}")
-            # Skip classification if Vertex AI client is not available
-            if not vertexai_client:
-                print(f"Warning: Vertex AI not configured. Skipping classification and using provided type: {document_type}")
-                detected_type = document_type
-                detected_normalized = document_type.lower().replace(" ", "_")
-            else:
-                try:
-                    detected_type = classify_document(text)["type"]
-                    print(f"Detected type: {detected_type}")
-                    detected_normalized = detected_type.lower().replace(" ", "_")
-                except HTTPException as he:
-                    # If classification fails with HTTPException (e.g., API key issue), use provided type
-                    print(f"Warning: Document classification failed: {he.detail}")
-                    print(f"Continuing with provided document type: {document_type}")
-                    detected_type = document_type
-                    detected_normalized = document_type.lower().replace(" ", "_")
-                except Exception as e:
-                    # If classification fails, log the error but continue with provided type
-                    print(f"Warning: Document classification failed: {str(e)}")
-                    print(f"Continuing with provided document type: {document_type}")
-                    detected_type = document_type
-                    detected_normalized = document_type.lower().replace(" ", "_")
-            
-            # Map frontend types to detected types
-            type_mapping = {
-                "bank_statement": ["bank_statement", "bank_statement"],
-                "gst_return": ["gst_document", "gstr", "gst_return"],
-                "trial_balance": ["trial_balance"],
-                "profit_loss": ["profit_loss", "profit_&_loss", "p&l"],
-                "invoice": ["invoice"],
-                "purchase_order": ["purchase_order", "po"],
-                "salary_slip": ["payroll_report", "salary_slip", "payslip"],
-                "balance_sheet": ["balance_sheet"],
-                "audit_papers": ["audit", "audit_papers"],
-                "agreement_contract": ["agreement", "contract", "agreement_contract"]
-            }
-            
-            # Check if types match
-            expected_types = type_mapping.get(document_type, [document_type])
-            if detected_normalized not in expected_types and detected_type != "Unknown":
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "Document type mismatch"}
-                )
+        # Classify document if type not provided
+        if not document_type:
+            print("Classifying document type...")
+            try:
+                detected = classify_document(text)
+                document_type = detected.get("type", "").lower().replace(" ", "_")
+                print(f"Detected document type: {document_type}")
+            except Exception as e:
+                print(f"Warning: Classification failed: {str(e)}")
+                document_type = "unknown"
         
-        # Step 2: Extract data based on document type
+        # Extract data based on document type
+        print(f"Extracting data for type: {document_type}")
+        result = {}
+        
         if document_type == "bank_statement" or (not document_type and "bank" in text.lower()):
             result = extract_bank_statement_structured(text)
-        elif document_type == "gst_return":
+        elif document_type == "gst_return" or document_type == "gst_document":
             result = extract_gst_return(text)
         elif document_type == "trial_balance":
             result = extract_trial_balance(text)
-        elif document_type == "profit_loss":
+        elif document_type == "profit_loss" or document_type == "p&l":
             result = extract_profit_loss(text)
         elif document_type == "invoice":
             result = extract_invoice(text)
-        elif document_type == "purchase_order":
+        elif document_type == "purchase_order" or document_type == "po":
             result = extract_purchase_order(text)
-        elif document_type == "salary_slip":
+        elif document_type == "salary_slip" or document_type == "payslip":
             result = extract_salary_slip(text)
         elif document_type == "balance_sheet":
             result = extract_balance_sheet(text)
-        elif document_type == "audit_papers":
+        elif document_type == "audit_papers" or document_type == "audit":
             result = extract_audit_papers(text)
-        elif document_type == "agreement_contract":
+        elif document_type == "agreement_contract" or document_type in ["agreement", "contract"]:
             result = extract_agreement_contract(text)
         else:
-            # Fallback: try to detect and extract
-            if not vertexai_client:
-                return JSONResponse(
+            raise HTTPException(
                     status_code=400,
-                    content={"error": "Document type is required when Vertex AI is not configured. Please specify a document type or configure Vertex AI."}
-                )
+                detail=f"Unsupported document type: {document_type or 'unknown'}. Supported types: bank_statement, gst_return, trial_balance, profit_loss, invoice, purchase_order, salary_slip, balance_sheet, audit_papers, agreement_contract"
+            )
+        
+        print(f"Processing completed successfully!")
+        
+        # Cache the complete result if Redis is available
+        if REDIS_AVAILABLE and redis_client:
             try:
-                detected_type = classify_document(text)["type"]
-                if detected_type == "Bank Statement":
-                    result = extract_bank_statement_structured(text)
-                else:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": f"Unsupported document type: {document_type or detected_type}"}
-                    )
-            except HTTPException as he:
-                return JSONResponse(
-                    status_code=he.status_code,
-                    content={"error": he.detail}
-                )
+                doc_cache_key = get_document_cache_key(content, document_type)
+                # Cache for 7 days (604800 seconds) - documents rarely change
+                redis_client.setex(doc_cache_key, 604800, json.dumps(result))
+                print(f"✓ Cached complete document result (key: {doc_cache_key[:30]}..., TTL: 7 days)")
             except Exception as e:
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": f"Failed to classify document: {str(e)}"}
-                )
+                print(f"Cache write error (result still returned): {str(e)}")
         
         return JSONResponse(content=result)
     
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"Error processing file: {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
     
     finally:
@@ -2421,8 +2561,310 @@ async def process_file(
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
+                print(f"Cleaned up temporary file: {temp_file_path}")
             except Exception as e:
-                print(f"Warning: Could not delete temporary file: {e}")
+                print(f"Warning: Could not delete temporary file {temp_file_path}: {e}")
+
+
+@app.get("/job/{job_id}/status")
+async def get_job_status(job_id: str):
+    """Get the status of a processing job"""
+    if not CELERY_AVAILABLE or not celery_app:
+        raise HTTPException(
+            status_code=503,
+            detail="Job queue is not available. Please start Redis and Celery worker."
+        )
+    
+    try:
+        task = celery_app.AsyncResult(job_id)
+        
+        # Safely get task state - use ready() and successful() methods to avoid exceptions
+        task_state = 'PENDING'
+        task_ready = False
+        task_info = {}
+        
+        try:
+            # Check if task is ready (completed, failed, or revoked) - this doesn't throw exceptions
+            task_ready = task.ready()
+            
+            if task_ready:
+                # Task is done - check if successful or failed
+                if task.successful():
+                    task_state = 'SUCCESS'
+                elif task.failed():
+                    task_state = 'FAILURE'
+                else:
+                    # Try to get state, but don't fail if it throws
+                    try:
+                        task_state = task.state
+                    except Exception:
+                        task_state = 'UNKNOWN'
+            else:
+                # Task is still running or pending - check state safely
+                try:
+                    # For in-progress tasks, try to get state
+                    task_state = task.state
+                    if task_state not in ['PENDING', 'PROCESSING', 'STARTED']:
+                        task_state = 'PENDING'
+                except Exception:
+                    task_state = 'PENDING'
+        except Exception as state_error:
+            print(f"ERROR getting task state for {job_id}: {str(state_error)}")
+            # Default to pending if we can't determine state
+            task_state = 'PENDING'
+            task_ready = False
+        
+        # Safely get task info/meta - only access if task is ready or use safe methods
+        if task_ready:
+            try:
+                # Use get() with propagate=False to safely retrieve result/info
+                task_info_raw = task.get(propagate=False)
+                if isinstance(task_info_raw, dict):
+                    task_info = task_info_raw
+                elif task_info_raw is not None:
+                    task_info = {'result': task_info_raw}
+            except Exception:
+                try:
+                    # Fallback: try to access info directly for failed tasks
+                    if task_state == 'FAILURE':
+                        info = task.info
+                        if isinstance(info, dict):
+                            task_info = info
+                        elif info is not None:
+                            task_info = {'error': str(info)}
+                except Exception:
+                    task_info = {}
+        else:
+            # For non-ready tasks, try to get progress updates
+            try:
+                info = task.info
+                if isinstance(info, dict):
+                    task_info = info
+                elif info is not None and info != 'None':
+                    task_info = {'info': str(info)}
+            except Exception:
+                task_info = {}
+        
+        if task_state == 'PENDING':
+            # Job is waiting to start
+            response = {
+                'job_id': job_id,
+                'status': 'pending',
+                'state': task_state,
+                'message': 'Job is waiting to be processed'
+            }
+        elif task_state == 'PROCESSING':
+            # Job is currently being processed
+            meta = task_info if isinstance(task_info, dict) else {}
+            response = {
+                'job_id': job_id,
+                'status': 'processing',
+                'state': task_state,
+                'progress': meta.get('progress', 0),
+                'message': meta.get('status', 'Processing document...')
+            }
+        elif task_state == 'SUCCESS':
+            # Job completed successfully
+            meta = task_info if isinstance(task_info, dict) else {}
+            # Safely get result
+            try:
+                result = meta.get('result') if isinstance(meta, dict) else None
+                if result is None:
+                    result = task.result if hasattr(task, 'result') else None
+            except Exception as result_error:
+                print(f"WARNING: Error getting task result for {job_id}: {str(result_error)}")
+                result = None
+            
+            response = {
+                'job_id': job_id,
+                'status': 'completed',
+                'state': task_state,
+                'progress': 100,
+                'message': 'Processing completed successfully'
+            }
+            # Include result if available
+            if result:
+                response['result'] = result
+        elif task_state == 'FAILURE':
+            # Job failed
+            meta = task_info if isinstance(task_info, dict) else {}
+            error_message = "Unknown error"
+            error_type = "UnknownError"
+            
+            if isinstance(meta, dict):
+                error_message = meta.get('error', str(task_info) if task_info else "Unknown error")
+                error_type = meta.get('error_type', 'UnknownError')
+            elif task_info:
+                error_message = str(task_info)
+            
+            response = {
+                'job_id': job_id,
+                'status': 'failed',
+                'state': task_state,
+                'error': error_message,
+                'error_type': error_type,
+                'message': f"Processing failed: {error_message}"
+            }
+        else:
+            # Unknown state
+            response = {
+                'job_id': job_id,
+                'status': 'unknown',
+                'state': task_state,
+                'message': f'Job is in {task_state} state'
+            }
+        
+        return JSONResponse(content=response)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"ERROR in get_job_status for {job_id}: {str(e)}")
+        print(f"Traceback:\n{error_trace}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error checking job status: {str(e)}. Check backend logs for details."
+        )
+
+
+@app.get("/job/{job_id}/result")
+async def get_job_result(job_id: str):
+    """Get the result of a completed processing job"""
+    if not CELERY_AVAILABLE or not celery_app:
+        raise HTTPException(
+            status_code=503,
+            detail="Job queue is not available. Please start Redis and Celery worker."
+        )
+    
+    try:
+        task = celery_app.AsyncResult(job_id)
+        
+        # Safely get task state
+        try:
+            task_state = task.state
+        except Exception as state_error:
+            print(f"ERROR getting task state for result {job_id}: {str(state_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error accessing task state: {str(state_error)}"
+            )
+        
+        if task_state == 'PENDING':
+            raise HTTPException(status_code=202, detail="Job is still pending")
+        elif task_state == 'PROCESSING':
+            raise HTTPException(status_code=202, detail="Job is still processing")
+        elif task_state == 'FAILURE':
+            try:
+                meta = task.info if task.info else {}
+                if isinstance(meta, dict):
+                    error_msg = meta.get('error', 'Unknown error')
+                else:
+                    error_msg = str(meta) if meta else 'Unknown error'
+            except Exception as e:
+                error_msg = f"Error retrieving failure info: {str(e)}"
+            raise HTTPException(
+                    status_code=500,
+                detail=f"Job failed: {error_msg}"
+            )
+        elif task_state == 'SUCCESS':
+            # Safely get result
+            try:
+                task_info = task.info if task.info else {}
+                result = None
+                if isinstance(task_info, dict):
+                    result = task_info.get('result')
+                if result is None:
+                    try:
+                        result = task.result
+                    except Exception:
+                        result = None
+            except Exception as result_error:
+                print(f"ERROR getting task result for {job_id}: {str(result_error)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error retrieving result: {str(result_error)}"
+                )
+            
+            if result is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Job completed but result is not available"
+                )
+            
+            return JSONResponse(content=result)
+        else:
+            raise HTTPException(status_code=500, detail=f"Unknown job state: {task_state}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"ERROR in get_job_result for {job_id}: {str(e)}")
+        print(f"Traceback:\n{error_trace}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving job result: {str(e)}")
+
+@app.get("/health")
+async def health():
+    """Health check endpoint"""
+    redis_status = "available" if REDIS_AVAILABLE else "unavailable"
+    return {"status": "healthy", "redis": redis_status}
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Get Redis cache statistics"""
+    if not REDIS_AVAILABLE or not redis_client:
+        raise HTTPException(status_code=503, detail="Redis is not available")
+    
+    try:
+        # Get cache keys count for different cache types
+        ai_cache_keys = redis_client.keys("gemini_cache:*")
+        document_cache_keys = redis_client.keys("document_cache:*")
+        ai_cache_count = len(ai_cache_keys)
+        document_cache_count = len(document_cache_keys)
+        total_cache_count = ai_cache_count + document_cache_count
+        
+        # Get Redis info
+        info = redis_client.info("memory")
+        memory_used = info.get("used_memory_human", "N/A")
+        
+        return {
+            "status": "ok",
+            "cache_entries": {
+                "ai_responses": ai_cache_count,
+                "document_results": document_cache_count,
+                "total": total_cache_count
+            },
+            "memory_used": memory_used,
+            "redis_available": True
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting cache stats: {str(e)}")
+
+@app.get("/cache/clear")
+async def clear_cache():
+    """Clear all cached responses"""
+    if not REDIS_AVAILABLE or not redis_client:
+        raise HTTPException(status_code=503, detail="Redis is not available")
+    
+    try:
+        ai_cache_keys = redis_client.keys("gemini_cache:*")
+        document_cache_keys = redis_client.keys("document_cache:*")
+        all_cache_keys = ai_cache_keys + document_cache_keys
+        if all_cache_keys:
+            redis_client.delete(*all_cache_keys)
+        return {
+            "status": "success",
+            "cleared_entries": {
+                "ai_responses": len(ai_cache_keys),
+                "document_results": len(document_cache_keys),
+                "total": len(all_cache_keys)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error clearing cache: {str(e)}")
 
 @app.get("/")
 async def root():

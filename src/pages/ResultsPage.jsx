@@ -159,9 +159,76 @@ const ResultsPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const fileName = location.state?.fileName || "BankStatement_Jan2025.pdf";
-  const result = location.state?.result;
+  let result = location.state?.result;
   const documentType = location.state?.documentType || "bank_statement";
   const [activeTab, setActiveTab] = useState("reports"); // reports, charts, ratios, transactions
+  const [pollingJobId, setPollingJobId] = useState(null);
+  
+  // Check if result contains a job_id (job not completed yet)
+  React.useEffect(() => {
+    if (result && result.job_id && (result.status === "queued" || result.status === "pending")) {
+      console.log("ResultsPage - Detected job_id in result, starting polling:", result.job_id);
+      setPollingJobId(result.job_id);
+      
+      const API_URL = import.meta.env.VITE_FASTAPI_URL || 'http://localhost:8000';
+      const jobId = result.job_id;
+      
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusResponse = await fetch(`${API_URL}/job/${jobId}/status`);
+          if (!statusResponse.ok) {
+            throw new Error(`Status check failed: ${statusResponse.status}`);
+          }
+          
+          const statusData = await statusResponse.json();
+          console.log("ResultsPage - Polling job status:", statusData);
+          
+          if (statusData.status === "completed" || statusData.state === "SUCCESS") {
+            clearInterval(pollInterval);
+            
+            // Fetch the actual result
+            const resultResponse = await fetch(`${API_URL}/job/${jobId}/result`);
+            if (!resultResponse.ok) {
+              throw new Error("Failed to fetch job result");
+            }
+            
+            const resultData = await resultResponse.json();
+            console.log("ResultsPage - Job result received:", resultData);
+            
+            // Extract the actual data
+            let actualData = resultData;
+            let reports = {};
+            
+            if (resultData.extracted_data) {
+              actualData = resultData.extracted_data;
+              reports = resultData.reports || {};
+            } else if (resultData.result && resultData.result.extracted_data) {
+              actualData = resultData.result.extracted_data;
+              reports = resultData.result.reports || {};
+            }
+            
+            // Update the result in state by navigating with new data
+            navigate("/dashboard/results", {
+              state: {
+                fileName: fileName || resultData.filename,
+                result: { ...actualData, reports },
+                documentType: documentType || resultData.document_type || "unknown",
+                replace: true
+              }
+            });
+          } else if (statusData.status === "failed" || statusData.state === "FAILURE") {
+            clearInterval(pollInterval);
+            console.error("ResultsPage - Job failed:", statusData.error);
+          }
+        } catch (pollError) {
+          console.error("ResultsPage - Error polling:", pollError);
+        }
+      }, 2000);
+      
+      // Cleanup on unmount
+      return () => clearInterval(pollInterval);
+    }
+  }, [result, navigate, fileName, documentType]);
   
   // Get document type configuration
   const docConfig = getDocumentTypeConfig(documentType);
@@ -247,6 +314,14 @@ const ResultsPage = () => {
     if (result) {
       console.log("ResultsPage - Full result data:", JSON.stringify(result, null, 2));
       console.log("ResultsPage - Result keys:", Object.keys(result));
+      
+      // Check if this is a job_id response (job still processing)
+      if (result.job_id && (result.status === "queued" || result.status === "pending")) {
+        console.log("ResultsPage - WARNING: Received job_id instead of processed data. Job might still be processing.");
+        console.log("ResultsPage - Job ID:", result.job_id);
+        return; // Don't log other data if this is just a job_id
+      }
+      
       console.log("ResultsPage - Has reports:", !!result.reports);
       console.log("ResultsPage - Transactions:", result.transactions);
       console.log("ResultsPage - Total deposits:", result.total_deposits);
