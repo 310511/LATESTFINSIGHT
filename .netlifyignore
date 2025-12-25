@@ -1,0 +1,23 @@
+# Exclude from Netlify build
+poppler-25.12.0/
+tesseract-ocr-w64-setup-*.exe
+backend/venv/
+venv/
+*.dll
+*.exe
+*.dylib
+*.so
+.env
+.env.local
+.env.*.local
+backend/.env
+backend/.env.local
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+dist/
+build/
+

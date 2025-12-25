@@ -38,6 +38,11 @@ ENV/
 .env
 .env.local
 .env.*.local
+backend/.env
+backend/.env.local
+*.env
+!.env.example
+!.env.template
 
 # OS
 Thumbs.db
