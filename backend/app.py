@@ -131,12 +131,15 @@ elif gemini_api_key:
     gemini_api_key_available = True
     print("WARNING: Using Gemini API directly instead of Vertex AI. For production, use Vertex AI.")
     print("Set VERTEXAI_PROJECT_ID and VERTEXAI_LOCATION in .env file for Vertex AI.")
+    print("✓ Gemini API key configured and ready for document processing")
 
 # Ensure Gemini API is available as fallback even if Vertex AI is initialized
 if gemini_api_key and not gemini_api_key_available:
     gemini_api_key_available = True
     print(f"✓ Gemini API key available for fallback use")
-else:
+
+# Only show error if neither is configured
+if not vertexai_client and not gemini_api_key_available:
     print("WARNING: Neither Vertex AI nor Gemini API key configured. Document processing will fail.")
     print("Please set VERTEXAI_PROJECT_ID or GEMINI_API_KEY in .env file.")
 
