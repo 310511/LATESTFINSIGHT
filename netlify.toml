@@ -5,43 +5,6 @@
 [build.environment]
   NODE_VERSION = "18"
 
-# Configure secrets scanning
-[build.processing]
-  skip_processing = false
-
-# Exclude paths from secrets scanning
-[build.processing.secrets]
-  # Exclude binary files and third-party libraries
-  omit_paths = [
-    "poppler-25.12.0/**",
-    "tesseract-ocr-w64-setup-*.exe",
-    "dist/**",
-    "node_modules/**",
-    "backend/venv/**",
-    "venv/**",
-    "*.dll",
-    "*.exe",
-    "*.dylib",
-    "*.so"
-  ]
-  
-  # Exclude common environment variable names that are not secrets
-  omit_keys = [
-    "HOST",
-    "PORT",
-    "NODE_ENV",
-    "FRONTEND_URL",
-    "POPPLER_PATH",
-    "TESSERACT_CMD",
-    "VITE_API_URL",
-    "VITE_FASTAPI_URL",
-    "VERTEXAI_LOCATION",
-    "VERTEXAI_MODEL",
-    "CELERY_BROKER_URL",
-    "CELERY_RESULT_BACKEND",
-    "REDIS_URL"
-  ]
-
 # Redirects for SPA
 [[redirects]]
   from = "/*"
