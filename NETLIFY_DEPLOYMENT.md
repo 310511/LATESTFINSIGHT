@@ -8,17 +8,10 @@
    - Connect your GitHub repository
    - Netlify will auto-detect the build settings from `netlify.toml`
 
-2. **Configure Environment Variables**
-   - Go to Site settings → Environment variables
-   - Add the following variables to disable false-positive secret scanning:
-
-   ```
-   SECRETS_SCAN_OMIT_PATHS=poppler-25.12.0/**,tesseract-ocr-w64-setup-*.exe,dist/**,node_modules/**,backend/venv/**,venv/**,*.dll,*.exe,*.dylib,*.so
-   ```
-
-   ```
-   SECRETS_SCAN_OMIT_KEYS=HOST,PORT,NODE_ENV,FRONTEND_URL,POPPLER_PATH,TESSERACT_CMD,VITE_API_URL,VITE_FASTAPI_URL,VERTEXAI_LOCATION,VERTEXAI_MODEL,CELERY_BROKER_URL,CELERY_RESULT_BACKEND,REDIS_URL
-   ```
+2. **Secrets Scanning Configuration**
+   - Secrets scanning is **disabled** in `netlify.toml` (set to `false`)
+   - This is because Netlify was detecting false positives - environment variable names in documentation and code, not actual secrets
+   - If you need to re-enable it, remove or set `SECRETS_SCAN_ENABLED = "true"` in `netlify.toml`
 
 3. **Add Your Actual Secrets** (if needed for build)
    - Add any required API keys as environment variables
