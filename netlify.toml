@@ -6,6 +6,9 @@
   NODE_VERSION = "18"
   # Disable secrets scanning - these are false positives (env var names in docs/code)
   SECRETS_SCAN_ENABLED = "false"
+  # Alternative: Omit paths and keys (if SECRETS_SCAN_ENABLED doesn't work)
+  SECRETS_SCAN_OMIT_PATHS = "poppler-25.12.0/**,tesseract-ocr-w64-setup-*.exe,dist/**,node_modules/**,backend/**,*.md,*.txt,*.exe,*.dll"
+  SECRETS_SCAN_OMIT_KEYS = "HOST,PORT,NODE_ENV,FRONTEND_URL,POPPLER_PATH,TESSERACT_CMD,VITE_API_URL,VITE_FASTAPI_URL,VERTEXAI_LOCATION,VERTEXAI_MODEL,CELERY_BROKER_URL,CELERY_RESULT_BACKEND,REDIS_URL"
 
 # Redirects for SPA
 [[redirects]]

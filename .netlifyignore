@@ -1,8 +1,7 @@
 # Exclude from Netlify build
 poppler-25.12.0/
 tesseract-ocr-w64-setup-*.exe
-backend/venv/
-venv/
+backend/
 *.dll
 *.exe
 *.dylib
@@ -12,6 +11,8 @@ venv/
 .env.*.local
 backend/.env
 backend/.env.local
+backend/venv/
+venv/
 node_modules/
 __pycache__/
 *.pyc
@@ -20,4 +21,9 @@ __pycache__/
 .Python
 dist/
 build/
+# Documentation files that contain env var examples
+*.md
+!README.md
+!NETLIFY_DEPLOYMENT.md
 
+SECRETS_SCAN_ENABLED=false
