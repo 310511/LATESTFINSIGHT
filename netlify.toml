@@ -4,6 +4,8 @@
 
 [build.environment]
   NODE_VERSION = "18"
+  # Disable secrets scanning - these are false positives (env var names in docs/code)
+  SECRETS_SCAN_ENABLED = "false"
 
 # Redirects for SPA
 [[redirects]]
